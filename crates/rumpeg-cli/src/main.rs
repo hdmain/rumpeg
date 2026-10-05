@@ -65,7 +65,7 @@ enum Commands {
         /// Video bitrate (e.g. `500k`, `1500k`, `2000000`). Maps to QP heuristically.
         #[arg(long = "b:v", visible_alias = "bitrate")]
         bit_rate_video: Option<String>,
-        /// Audio bitrate hint.
+        /// Audio bitrate (e.g. `128k`). Used when muxing AAC into MP4.
         #[arg(long = "b:a")]
         bit_rate_audio: Option<String>,
         /// CRF-like quality for H.264 (0=best … 51=worst); mapped to QP.
@@ -77,6 +77,9 @@ enum Commands {
         /// GOP size / IDR interval for H.264 (default 30; `1` = all Intra).
         #[arg(long = "gop")]
         gop: Option<u32>,
+        /// Faster re-encode: `scale=640:-2` + `-b:v 800k` (unless already set).
+        #[arg(long = "fast")]
+        fast: bool,
         /// JPEG/MJPEG quality 1–100 (encoding hint; MJPEG encoder uses default today).
         #[arg(long = "q:v")]
         quality_video: Option<u8>,
@@ -120,6 +123,7 @@ fn run(cli: Cli) -> Result<()> {
             crf,
             qp,
             gop,
+            fast,
             quality_video,
         } => cmd_convert(
             &input,
@@ -139,6 +143,7 @@ fn run(cli: Cli) -> Result<()> {
             crf,
             qp,
             gop,
+            fast,
             quality_video,
         ),
         Commands::Codecs => cmd_codecs(),
@@ -242,13 +247,64 @@ fn cmd_convert(
     crf: Option<f32>,
     qp: Option<i32>,
     gop: Option<u32>,
+    fast: bool,
     quality_video: Option<u8>,
 ) -> Result<()> {
     let video_filter = merge_vf_fps(video_filter, fps)?;
-    let video_filter = video_filter.as_deref();
+    let mut video_filter = video_filter;
+    let mut bit_rate_video = bit_rate_video.map(|s| s.to_string());
 
-    let reencode_video =
-        fps.is_some() || bit_rate_video.is_some() || crf.is_some() || qp.is_some() || gop.is_some();
+    if fast {
+        if !vf_has_scale(video_filter.as_deref()) {
+            video_filter = Some(match video_filter {
+                Some(v) => format!("scale=640:-2,{v}"),
+                None => "scale=640:-2".to_string(),
+            });
+        }
+        if bit_rate_video.is_none() && crf.is_none() && qp.is_none() {
+            bit_rate_video = Some("800k".to_string());
+        }
+        eprintln!(
+            "rumpeg: --fast → scale≤640 + bitrate heuristic (override with --vf / -b:v / --crf)"
+        );
+    }
+
+    // Auto-speed for large MP4 re-encodes when no quality knobs / scale given.
+    if is_mp4_output(output)
+        && !is_still_image_output(output)
+        && !vf_has_scale(video_filter.as_deref())
+        && bit_rate_video.is_none()
+        && crf.is_none()
+        && qp.is_none()
+    {
+        if let Ok(probe) = format::open_input(input) {
+            if let Some(v) = probe
+                .best_stream(MediaType::Video)
+                .and_then(|s| s.codec_params.video())
+            {
+                if v.width > 640 {
+                    video_filter = Some(match video_filter {
+                        Some(vf) => format!("scale=640:-2,{vf}"),
+                        None => "scale=640:-2".to_string(),
+                    });
+                    bit_rate_video = Some("800k".to_string());
+                    eprintln!(
+                        "rumpeg: auto scale=640:-2 -b:v 800k for speed (use --vf / -b:v to override)"
+                    );
+                }
+            }
+        }
+    }
+
+    let video_filter = video_filter.as_deref();
+    let bit_rate_video = bit_rate_video.as_deref();
+
+    let reencode_video = fps.is_some()
+        || bit_rate_video.is_some()
+        || crf.is_some()
+        || qp.is_some()
+        || gop.is_some()
+        || fast;
 
     if let Some(()) = try_remux_copy(
         input,
@@ -268,9 +324,12 @@ fn cmd_convert(
     }
 
     let still = is_still_image_output(output);
-    let prefer_video = still || frames.is_some() || video_filter.is_some() || reencode_video;
+    let prefer_video = still
+        || frames.is_some()
+        || video_filter.is_some()
+        || reencode_video
+        || is_mp4_output(output);
     if prefer_video {
-        // Only force a single frame for still-image outputs (thumbnails).
         let frame_limit = frames.or(if still { Some(1) } else { None });
         return try_convert_video(
             input,
@@ -280,6 +339,7 @@ fn cmd_convert(
             map,
             codec_video.or(codec),
             bit_rate_video,
+            bit_rate_audio,
             crf,
             qp,
             gop,
@@ -287,7 +347,6 @@ fn cmd_convert(
         );
     }
 
-    // Auto-select based on available streams.
     let probe = format::open_input(input)?;
     if probe.best_stream(MediaType::Video).is_some()
         && probe.best_stream(MediaType::Audio).is_none()
@@ -301,6 +360,7 @@ fn cmd_convert(
             map,
             codec_video.or(codec),
             bit_rate_video,
+            bit_rate_audio,
             crf,
             qp,
             gop,
@@ -320,6 +380,26 @@ fn cmd_convert(
     )
 }
 
+fn is_mp4_output(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("mp4") | Some("m4v") | Some("mov")
+    )
+}
+
+fn vf_has_scale(vf: Option<&str>) -> bool {
+    vf.map(|v| {
+        v.split(',').any(|p| {
+            let name = p.trim().split('=').next().unwrap_or("").trim();
+            name == "scale"
+        })
+    })
+    .unwrap_or(false)
+}
+
 /// Combine `--vf` with `--fps`/`-r`. Returns owned string when either is set.
 fn merge_vf_fps(vf: Option<&str>, fps: Option<u32>) -> Result<Option<String>> {
     match (vf, fps) {
@@ -335,8 +415,6 @@ fn merge_vf_fps(vf: Option<&str>, fps: Option<u32>) -> Result<Option<String>> {
             if n == 0 {
                 return Err(Error::invalid_data("--fps must be > 0"));
             }
-            // Prefer explicit `--fps` when vf already has fps=… by appending
-            // (last fps filter wins for Graph::target_fps).
             if vf_has_fps(v) {
                 Ok(Some(format!("{v},fps={n}")))
             } else {
@@ -353,6 +431,20 @@ fn vf_has_fps(vf: &str) -> bool {
     })
 }
 
+fn parse_scale_from_vf(vf: &str, src_w: u32, src_h: u32) -> Option<(u32, u32)> {
+    for part in vf.split(',') {
+        let part = part.trim();
+        if let Some(args) = part.strip_prefix("scale=") {
+            let args = args.replace('x', ":");
+            let (w, h) = args.split_once(':')?;
+            let tw: i32 = w.parse().ok()?;
+            let th: i32 = h.parse().ok()?;
+            return Some(rumpeg::filter::ScaleFilter::resolve(src_w, src_h, tw, th));
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_convert_video(
     input: &PathBuf,
@@ -362,6 +454,7 @@ fn try_convert_video(
     map: Option<&str>,
     codec_name: Option<&str>,
     bit_rate_video: Option<&str>,
+    bit_rate_audio: Option<&str>,
     crf: Option<f32>,
     qp: Option<i32>,
     gop: Option<u32>,
@@ -372,7 +465,19 @@ fn try_convert_video(
     if in_stream.media_type != MediaType::Video {
         return Err(Error::invalid_data("-map must select a video stream"));
     }
+    let audio_in = if map.is_none() && is_mp4_output(output) && still_image_codec(output).is_none()
+    {
+        demuxer.best_stream(MediaType::Audio).cloned()
+    } else {
+        None
+    };
+
     let mut decoder = codec::open_decoder(&in_stream.codec_params)?;
+    let mut audio_decoder = if let Some(ref a) = audio_in {
+        Some(codec::open_decoder(&a.codec_params)?)
+    } else {
+        None
+    };
 
     let still_codec = still_image_codec(output);
     let max_frames = frames.unwrap_or(if still_codec.is_some() { 1 } else { u64::MAX });
@@ -390,18 +495,24 @@ fn try_convert_video(
         })
         .unwrap_or(25);
 
+    let src_w = in_stream
+        .codec_params
+        .video()
+        .map(|v| v.width.max(1))
+        .unwrap_or(1);
+    let src_h = in_stream
+        .codec_params
+        .video()
+        .map(|v| v.height.max(1))
+        .unwrap_or(1);
+
     let mut out_params = if let Some(codec_id) = still_codec {
-        let (w, h) = in_stream
-            .codec_params
-            .video()
-            .map(|v| (v.width.max(1), v.height.max(1)))
-            .unwrap_or((1, 1));
         CodecParams::video_codec(
             codec_id,
             VideoParams {
                 pix_fmt: PixelFormat::Rgb24,
-                width: w,
-                height: h,
+                width: src_w,
+                height: src_h,
                 frame_rate: Default::default(),
                 sample_aspect_ratio: Default::default(),
             },
@@ -410,16 +521,19 @@ fn try_convert_video(
         let video = in_stream.codec_params.video().cloned().unwrap_or_default();
         CodecParams::video_codec(parse_video_codec_name(name)?, video)
     } else {
-        // Re-encode H.264 by default for MP4/H.264 outputs (not stream copy).
         let mut video = in_stream.codec_params.video().cloned().unwrap_or_default();
-        let codec_id = match output
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("mp4") | Some("m4v") | Some("mov") | Some("h264") | Some("264") => CodecId::H264,
-            _ => in_stream.codec_params.codec_id,
+        let codec_id = if is_mp4_output(output)
+            || matches!(
+                output
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
+                Some("h264") | Some("264")
+            ) {
+            CodecId::H264
+        } else {
+            in_stream.codec_params.codec_id
         };
         if codec_id == CodecId::H264 {
             video.pix_fmt = PixelFormat::Yuv420p;
@@ -427,7 +541,13 @@ fn try_convert_video(
         CodecParams::video_codec(codec_id, video)
     };
 
-    // Apply rate / quality knobs before opening the encoder.
+    if let (Some(vf), Some(v)) = (video_filter, out_params.video_mut()) {
+        if let Some((w, h)) = parse_scale_from_vf(vf, src_w, src_h) {
+            v.width = w;
+            v.height = h;
+        }
+    }
+
     if let Some(br) = bit_rate_video {
         out_params.bit_rate = parse_bit_rate(br)?;
     }
@@ -442,9 +562,6 @@ fn try_convert_video(
     } else if out_params.codec_id == CodecId::H264 && out_params.gop_size == 0 {
         out_params.gop_size = 30;
     }
-    if quality_video.is_some() && out_params.codec_id == CodecId::Mjpeg {
-        eprintln!("rumpeg: note: -q:v is not yet applied by the MJPEG encoder");
-    }
     let _ = quality_video;
 
     let mut graph = video_filter
@@ -453,14 +570,12 @@ fn try_convert_video(
         .unwrap_or_default();
     graph.set_fps_source(source_fps);
 
-    // Honor fps filter / --fps in output stream timing.
     if let Some(target) = graph.target_fps() {
         if let Some(v) = out_params.video_mut() {
             v.frame_rate = Rational::new(target as i32, 1);
         }
     }
 
-    // For MP4 output of H.264, ensure avcC extradata is present.
     if out_params.codec_id == CodecId::H264 && out_params.extradata.is_empty() {
         if let Some(v) = out_params.video() {
             if let Ok(enc) = rumpeg::h264::Encoder::with_mode(
@@ -480,60 +595,103 @@ fn try_convert_video(
         None
     };
     let mut muxer = format::open_output(output, format_hint)?;
-    let out_index = muxer.add_stream(out_params)?;
+    let out_v = muxer.add_stream(out_params)?;
+
+    let mut audio_encoder = None;
+    let mut out_a = None;
+    if let Some(ref ain) = audio_in {
+        let mut audio = ain.codec_params.audio().cloned().unwrap_or_default();
+        audio.sample_fmt = SampleFormat::S16;
+        let mut aparams = CodecParams::audio_codec(CodecId::Aac, audio);
+        aparams.bit_rate = match bit_rate_audio {
+            Some(br) => parse_bit_rate(br)?,
+            None => 128_000,
+        };
+        let sr = aparams.audio().map(|a| a.sample_rate).unwrap_or(48_000);
+        let ch = aparams.audio().map(|a| a.layout.channels).unwrap_or(2);
+        aparams.extradata = rumpeg::codec::aac::AacEncoderCodec::audio_specific_config(sr, ch);
+        audio_encoder = Some(codec::open_encoder(&aparams)?);
+        out_a = Some(muxer.add_stream(aparams)?);
+    }
+
     muxer.write_header()?;
 
     let mut encoded_frames = 0u64;
+    let audio_index = audio_in.as_ref().map(|s| s.index);
+
     loop {
-        if encoded_frames >= max_frames {
-            break;
-        }
         let packet = match demuxer.read_packet() {
             Ok(p) => p,
             Err(Error::Eof) => break,
             Err(e) => return Err(e),
         };
-        if packet.stream_index != in_stream.index {
-            continue;
-        }
-        for frame in decoder.decode(&packet)? {
-            for frame in graph.run_all(frame)? {
-                for mut pkt in encoder.encode(&frame)? {
-                    pkt.stream_index = out_index;
-                    muxer.write_packet(&pkt)?;
-                }
-                encoded_frames += 1;
-                if encoded_frames >= max_frames {
-                    break;
+        if packet.stream_index == in_stream.index {
+            if encoded_frames >= max_frames {
+                continue;
+            }
+            for frame in decoder.decode(&packet)? {
+                for frame in graph.run_all(frame)? {
+                    for mut pkt in encoder.encode(&frame)? {
+                        pkt.stream_index = out_v;
+                        muxer.write_packet(&pkt)?;
+                    }
+                    encoded_frames += 1;
+                    if encoded_frames >= max_frames {
+                        break;
+                    }
                 }
             }
-            if encoded_frames >= max_frames {
-                break;
+        } else if Some(packet.stream_index) == audio_index {
+            if let (Some(adec), Some(aenc), Some(ai)) =
+                (audio_decoder.as_mut(), audio_encoder.as_mut(), out_a)
+            {
+                for frame in adec.decode(&packet)? {
+                    for mut pkt in aenc.encode(&frame)? {
+                        pkt.stream_index = ai;
+                        muxer.write_packet(&pkt)?;
+                    }
+                }
             }
         }
     }
 
-    if encoded_frames < max_frames {
-        decoder.send_eof()?;
-        loop {
-            if encoded_frames >= max_frames {
-                break;
-            }
-            match decoder.receive_frame() {
-                Ok(frame) => {
-                    for frame in graph.run_all(frame)? {
-                        for mut pkt in encoder.encode(&frame)? {
-                            pkt.stream_index = out_index;
-                            muxer.write_packet(&pkt)?;
-                        }
-                        encoded_frames += 1;
-                        if encoded_frames >= max_frames {
-                            break;
-                        }
+    decoder.send_eof()?;
+    loop {
+        if encoded_frames >= max_frames {
+            break;
+        }
+        match decoder.receive_frame() {
+            Ok(frame) => {
+                for frame in graph.run_all(frame)? {
+                    for mut pkt in encoder.encode(&frame)? {
+                        pkt.stream_index = out_v;
+                        muxer.write_packet(&pkt)?;
+                    }
+                    encoded_frames += 1;
+                    if encoded_frames >= max_frames {
+                        break;
                     }
                 }
-                Err(Error::Eof) | Err(Error::NeedMoreData) => break,
-                Err(e) => return Err(e),
+            }
+            Err(Error::Eof) | Err(Error::NeedMoreData) => break,
+            Err(e) => return Err(e),
+        }
+    }
+
+    if let Some(adec) = audio_decoder.as_mut() {
+        adec.send_eof()?;
+        if let (Some(aenc), Some(ai)) = (audio_encoder.as_mut(), out_a) {
+            loop {
+                match adec.receive_frame() {
+                    Ok(frame) => {
+                        for mut pkt in aenc.encode(&frame)? {
+                            pkt.stream_index = ai;
+                            muxer.write_packet(&pkt)?;
+                        }
+                    }
+                    Err(Error::Eof) | Err(Error::NeedMoreData) => break,
+                    Err(e) => return Err(e),
+                }
             }
         }
     }
@@ -542,16 +700,33 @@ fn try_convert_video(
     loop {
         match encoder.receive_packet() {
             Ok(mut pkt) => {
-                pkt.stream_index = out_index;
+                pkt.stream_index = out_v;
                 muxer.write_packet(&pkt)?;
             }
             Err(Error::Eof) | Err(Error::NeedMoreData) => break,
             Err(e) => return Err(e),
         }
     }
+    if let (Some(aenc), Some(ai)) = (audio_encoder.as_mut(), out_a) {
+        aenc.send_eof()?;
+        loop {
+            match aenc.receive_packet() {
+                Ok(mut pkt) => {
+                    pkt.stream_index = ai;
+                    muxer.write_packet(&pkt)?;
+                }
+                Err(Error::Eof) | Err(Error::NeedMoreData) => break,
+                Err(e) => return Err(e),
+            }
+        }
+    }
 
     muxer.write_trailer()?;
-    eprintln!("Wrote {} ({encoded_frames} frame(s))", output.display());
+    let audio_note = if out_a.is_some() { " + audio" } else { "" };
+    eprintln!(
+        "Wrote {} ({encoded_frames} frame(s){audio_note})",
+        output.display()
+    );
     Ok(())
 }
 
@@ -722,6 +897,7 @@ fn parse_audio_codec_name(name: &str) -> Result<CodecId> {
         "pcm_s32le" | "s32" => Ok(CodecId::PcmS32Le),
         "pcm_f32le" | "f32" | "flt" => Ok(CodecId::PcmF32Le),
         "pcm_u8" | "u8" => Ok(CodecId::PcmU8),
+        "aac" | "libfdk_aac" => Ok(CodecId::Aac),
         other => Err(Error::not_found(format!("audio codec '{other}'"))),
     }
 }

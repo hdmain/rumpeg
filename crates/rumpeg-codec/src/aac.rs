@@ -122,12 +122,16 @@ pub struct AacEncoderCodec {
     inner: rusty_aac::AacEncoder,
     pending: VecDeque<Packet>,
     eof: bool,
+    #[allow(dead_code)]
+    sample_rate: u32,
+    #[allow(dead_code)]
+    channels: u16,
 }
 
 impl AacEncoderCodec {
     /// Open an AAC-LC encoder.
     pub fn new(params: &CodecParams) -> Result<Self> {
-        let _ = audio_params(params)?;
+        let audio = audio_params(params)?;
         let mut cfg = rusty_aac::AacEncoderConfig::default();
         if params.bit_rate > 0 {
             cfg.bitrate_bps = params.bit_rate as u32;
@@ -136,7 +140,14 @@ impl AacEncoderCodec {
             inner: rusty_aac::AacEncoder::new(cfg),
             pending: VecDeque::new(),
             eof: false,
+            sample_rate: audio.sample_rate.max(1),
+            channels: audio.layout.channels.max(1),
         })
+    }
+
+    /// AudioSpecificConfig bytes for MP4 `esds` / extradata.
+    pub fn audio_specific_config(sample_rate: u32, channels: u16) -> Vec<u8> {
+        rusty_aac::audio_specific_config_bytes(sample_rate, channels)
     }
 
     fn drain(&mut self) {

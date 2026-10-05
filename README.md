@@ -36,35 +36,32 @@ rumpeg convert -i input.mp4 -o thumb.jpg --frames 1 --vf scale=16:16
 rumpeg convert -i clip.h264 -o thumb.png --frames 1 --vf scale=16:16,hflip
 ```
 
-## Re-encode: FPS + bitrate / quality
+## Re-encode: FPS + bitrate / quality (+ audio)
 
 ```bash
-# Change frame rate (reads source fps from MP4 timing; rewrites stts / duration)
-rumpeg convert -i input.mp4 -o out.mp4 --fps 24
-rumpeg convert -i input.mp4 -o out.mp4 -r 15
-rumpeg convert -i input.mp4 -o out.mp4 --vf fps=30
+# Fast path (recommended): downscale + bitrate, keeps AAC audio in MP4
+rumpeg convert -i input.mp4 -o out.mp4 --fast
+rumpeg convert -i input.mp4 -o out.mp4 --vf scale=640:-2 -b:v 800k -b:a 128k
 
-# Reduce size via bitrate heuristic, CRF-like quality, or explicit QP
-rumpeg convert -i input.mp4 -o out.mp4 -b:v 1500k
-rumpeg convert -i input.mp4 -o out.mp4 --bitrate 800k
-rumpeg convert -i input.mp4 -o out.mp4 --crf 28
-rumpeg convert -i input.mp4 -o out.mp4 --qp 32 --gop 60
-
-# Combine
-rumpeg convert -i input.mp4 -o out.mp4 --vf fps=30 -b:v 1500k
+# Change frame rate
 rumpeg convert -i input.mp4 -o out.mp4 --fps 24 --crf 28
+
+# Explicit quality knobs
+rumpeg convert -i input.mp4 -o out.mp4 --qp 32 --gop 60
 ```
 
 | Flag | Meaning |
 |------|---------|
+| `--fast` | Inject `scale=640:-2` + `-b:v 800k` when unset (much faster encode) |
 | `--fps` / `-r` | Target frame rate (injects `fps=N` into `--vf`) |
-| `--vf fps=N` | Same filter; optional `fps=N:source=M` if source rate must be forced |
-| `-b:v` / `--bitrate` | Target video bitrate (`500k`, `2M`, or raw bits/s) → QP heuristic |
-| `--crf` | CRF-like 0…51 mapped to QP |
-| `--qp` | Explicit H.264 QP (overrides `--crf` / `-b:v`) |
-| `--gop` | IDR interval (default 30; `1` = all Intra) |
+| `--vf fps=N` / `scale=W:H` | Filters; `scale=640:-2` keeps aspect (even height) |
+| `-b:v` / `--bitrate` | Video bitrate → QP heuristic |
+| `-b:a` | AAC audio bitrate (default `128k` when muxing audio) |
+| `--crf` / `--qp` / `--gop` | H.264 quality / GOP |
 
-**Encoder choice:** pure-Rust Baseline **IDR + P** (`I_16x16` CAVLC, P = SKIP or Intra-refresh). No motion search, no CABAC encode, no 2-pass / VBV. Good enough to shrink Progressive movies; not x264 parity.
+**MP4 output** re-encodes **H.264 video + AAC audio** when the source has an audio track. Large sources without scale/bitrate auto-apply `scale=640:-2 -b:v 800k` for speed.
+
+**Encoder limits:** pure-Rust Baseline IDR+P (SKIP/Intra-refresh). No CABAC encode, no real motion search, no 2-pass.
 
 ## H.264 notes (`rumpeg-h264`)
 
@@ -114,7 +111,7 @@ Useful convert knobs: `--map`, `-c` / `--c:v` / `--c:a` (including `copy`), `--f
 - image2 demux: `.jpg` / `.png` as a single video packet
 
 **Containers (mux)**
-- WAV, MP4 (`avc1` H.264 with configurable timescale / sample delta / sync samples), image2 (JPEG/PNG)
+- WAV, MP4 (`avc1` H.264 + optional `mp4a` AAC), image2 (JPEG/PNG)
 - MKV / WebM / MPEG-TS mux: **not implemented** (demux only)
 
 **Video codecs**

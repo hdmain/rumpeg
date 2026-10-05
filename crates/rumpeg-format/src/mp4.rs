@@ -552,7 +552,8 @@ fn parse_stsd_mp4a(stsd: &[u8]) -> Result<(u32, u16, Vec<u8>)> {
     }
     let entry = &stsd[i..i + size];
     let channels = u16::from_be_bytes(entry[16..18].try_into().unwrap());
-    let sample_rate = u32::from_be_bytes([entry[24], entry[25], entry[26], entry[27]]);
+    // AudioSampleEntry sampleRate is 16.16 fixed-point.
+    let sample_rate = u16::from_be_bytes(entry[24..26].try_into().unwrap()) as u32;
 
     let mut j = 36;
     while j + 8 <= entry.len() {
@@ -789,17 +790,32 @@ fn expand_sample_offsets(
     Ok(offsets)
 }
 
-/// Minimal MP4 muxer for a single H.264 track (one or more AVCC samples).
+/// Minimal MP4 muxer: one H.264 video track + optional AAC audio track.
 pub struct Mp4Muxer {
     streams: Vec<Stream>,
-    extradata: Vec<u8>,
+    video: Option<VideoMuxState>,
+    audio: Option<AudioMuxState>,
+}
+
+struct VideoMuxState {
     width: u16,
     height: u16,
+    extradata: Vec<u8>,
     samples: Vec<Vec<u8>>,
     sample_is_key: Vec<bool>,
     timescale: u32,
-    /// Duration of each sample in `timescale` ticks.
     sample_delta: u32,
+    stream_index: usize,
+}
+
+struct AudioMuxState {
+    sample_rate: u32,
+    channels: u16,
+    asc: Vec<u8>,
+    samples: Vec<Vec<u8>>,
+    timescale: u32,
+    sample_delta: u32,
+    stream_index: usize,
 }
 
 impl Mp4Muxer {
@@ -807,13 +823,8 @@ impl Mp4Muxer {
     pub fn new() -> Self {
         Self {
             streams: Vec::new(),
-            extradata: Vec::new(),
-            width: 0,
-            height: 0,
-            samples: Vec::new(),
-            sample_is_key: Vec::new(),
-            timescale: 1000,
-            sample_delta: 40, // 25 fps default at 1000 Hz
+            video: None,
+            audio: None,
         }
     }
 }
@@ -830,41 +841,71 @@ impl Muxer for Mp4Muxer {
     }
 
     fn add_stream(&mut self, params: CodecParams) -> Result<usize> {
-        if !self.streams.is_empty() {
-            return Err(Error::invalid_data("MP4 muxer supports one video stream"));
-        }
-        if params.codec_id != CodecId::H264 {
-            return Err(Error::unsupported(
-                "MP4 muxer currently writes avc1/H.264 only",
-            ));
-        }
-        let video = params
-            .video()
-            .ok_or_else(|| Error::invalid_data("video params required"))?;
-        self.width = video.width as u16;
-        self.height = video.height as u16;
-        self.extradata = params.extradata.clone();
-        if self.extradata.is_empty() {
-            return Err(Error::invalid_data(
-                "H.264 MP4 mux requires avcC extradata on the stream",
-            ));
-        }
-        // Derive timescale + sample delta from frame_rate.
-        let fps = video.frame_rate.as_f64();
-        if fps > 0.0 && video.frame_rate.num > 0 && video.frame_rate.den > 0 {
-            // Prefer exact integer: timescale = fps.num, delta = fps.den when fps = num/den.
-            // Use a comfortable timescale (≥ fps) so delta ≥ 1.
-            let num = video.frame_rate.num.unsigned_abs().max(1);
-            let den = video.frame_rate.den.unsigned_abs().max(1);
-            // timescale ticks/sec such that delta = timescale * den / num is integer.
-            self.timescale = num;
-            self.sample_delta = den;
-            if self.sample_delta == 0 {
-                self.sample_delta = 1;
+        match params.codec_id {
+            CodecId::H264 => {
+                if self.video.is_some() {
+                    return Err(Error::invalid_data("MP4 muxer supports one video stream"));
+                }
+                let video = params
+                    .video()
+                    .ok_or_else(|| Error::invalid_data("video params required"))?;
+                if params.extradata.is_empty() {
+                    return Err(Error::invalid_data(
+                        "H.264 MP4 mux requires avcC extradata on the stream",
+                    ));
+                }
+                let mut timescale = 1000u32;
+                let mut sample_delta = 40u32;
+                let fps = video.frame_rate.as_f64();
+                if fps > 0.0 && video.frame_rate.num > 0 && video.frame_rate.den > 0 {
+                    timescale = video.frame_rate.num.unsigned_abs().max(1);
+                    sample_delta = video.frame_rate.den.unsigned_abs().max(1);
+                }
+                let idx = self.streams.len();
+                self.video = Some(VideoMuxState {
+                    width: video.width as u16,
+                    height: video.height as u16,
+                    extradata: params.extradata.clone(),
+                    samples: Vec::new(),
+                    sample_is_key: Vec::new(),
+                    timescale,
+                    sample_delta,
+                    stream_index: idx,
+                });
+                self.streams.push(Stream::new(idx, params));
+                Ok(idx)
             }
+            CodecId::Aac => {
+                if self.audio.is_some() {
+                    return Err(Error::invalid_data("MP4 muxer supports one audio stream"));
+                }
+                let audio = params
+                    .audio()
+                    .ok_or_else(|| Error::invalid_data("audio params required"))?;
+                let asc = params.extradata.clone();
+                if asc.is_empty() {
+                    return Err(Error::invalid_data(
+                        "AAC MP4 mux requires AudioSpecificConfig extradata",
+                    ));
+                }
+                let sample_rate = audio.sample_rate.max(1);
+                let idx = self.streams.len();
+                self.audio = Some(AudioMuxState {
+                    sample_rate,
+                    channels: audio.layout.channels.max(1),
+                    asc,
+                    samples: Vec::new(),
+                    timescale: sample_rate,
+                    sample_delta: 1024, // AAC-LC frame size
+                    stream_index: idx,
+                });
+                self.streams.push(Stream::new(idx, params));
+                Ok(idx)
+            }
+            other => Err(Error::unsupported(format!(
+                "MP4 muxer supports avc1/H.264 and mp4a/AAC only (got {other})"
+            ))),
         }
-        self.streams.push(Stream::new(0, params));
-        Ok(0)
     }
 
     fn streams(&self) -> &[Stream] {
@@ -876,34 +917,53 @@ impl Muxer for Mp4Muxer {
     }
 
     fn write_packet(&mut self, _writer: &mut dyn IoWriter, packet: &Packet) -> Result<()> {
-        // Convert Annex-B → AVCC if needed.
-        let data = if packet.data.windows(4).any(|w| w == [0, 0, 0, 1])
-            || packet.data.windows(3).any(|w| w == [0, 0, 1])
-        {
-            rumpeg_h264::annexb_to_avcc_sample(packet.data.as_slice())
-        } else {
-            packet.data.as_slice().to_vec()
-        };
-        let filtered = filter_avcc_vcl(&data)?;
-        self.samples.push(filtered);
-        self.sample_is_key
-            .push(packet.flags.contains(PacketFlags::KEY));
-        Ok(())
+        if let Some(v) = self.video.as_mut() {
+            if packet.stream_index == v.stream_index {
+                let data = if packet.data.windows(4).any(|w| w == [0, 0, 0, 1])
+                    || packet.data.windows(3).any(|w| w == [0, 0, 1])
+                {
+                    rumpeg_h264::annexb_to_avcc_sample(packet.data.as_slice())
+                } else {
+                    packet.data.as_slice().to_vec()
+                };
+                let filtered = filter_avcc_vcl(&data)?;
+                v.samples.push(filtered);
+                v.sample_is_key
+                    .push(packet.flags.contains(PacketFlags::KEY));
+                return Ok(());
+            }
+        }
+        if let Some(a) = self.audio.as_mut() {
+            if packet.stream_index == a.stream_index {
+                // Strip ADTS header if present; store raw AAC AU.
+                let data = packet.data.as_slice();
+                let raw = if data.len() >= 7 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0 {
+                    let hdr = if (data[1] & 1) != 0 { 7 } else { 9 };
+                    data[hdr.min(data.len())..].to_vec()
+                } else {
+                    data.to_vec()
+                };
+                if !raw.is_empty() {
+                    a.samples.push(raw);
+                }
+                return Ok(());
+            }
+        }
+        Err(Error::invalid_data(format!(
+            "packet stream_index {} not in muxer",
+            packet.stream_index
+        )))
     }
 
     fn write_trailer(&mut self, writer: &mut dyn IoWriter) -> Result<()> {
-        if self.samples.is_empty() {
-            return Err(Error::invalid_data("no samples to mux"));
+        let video = self
+            .video
+            .as_ref()
+            .ok_or_else(|| Error::invalid_data("MP4 mux requires a video track"))?;
+        if video.samples.is_empty() {
+            return Err(Error::invalid_data("no video samples to mux"));
         }
-        let bytes = build_mp4(
-            self.width,
-            self.height,
-            &self.extradata,
-            &self.samples,
-            &self.sample_is_key,
-            self.timescale,
-            self.sample_delta,
-        )?;
+        let bytes = build_mp4_av(video, self.audio.as_ref())?;
         writer.write_all(&bytes)?;
         writer.flush()?;
         Ok(())
@@ -935,20 +995,21 @@ fn filter_avcc_vcl(sample: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-fn build_mp4(
-    width: u16,
-    height: u16,
-    avcc: &[u8],
-    samples: &[Vec<u8>],
-    sample_is_key: &[bool],
-    timescale: u32,
-    sample_delta: u32,
-) -> Result<Vec<u8>> {
+fn build_mp4_av(video: &VideoMuxState, audio: Option<&AudioMuxState>) -> Result<Vec<u8>> {
     let mut mdat_payload = Vec::new();
-    let mut sample_sizes = Vec::new();
-    for s in samples {
-        sample_sizes.push(s.len() as u32);
+    let mut video_sizes = Vec::new();
+    for s in &video.samples {
+        video_sizes.push(s.len() as u32);
         mdat_payload.extend_from_slice(s);
+    }
+    let video_chunk_size = mdat_payload.len() as u32;
+
+    let mut audio_sizes = Vec::new();
+    if let Some(a) = audio {
+        for s in &a.samples {
+            audio_sizes.push(s.len() as u32);
+            mdat_payload.extend_from_slice(s);
+        }
     }
 
     let ftyp = box_of(b"ftyp", {
@@ -964,18 +1025,16 @@ fn build_mp4(
 
     let mdat_header = 8u32;
     let mdat_box_size = mdat_header + mdat_payload.len() as u32;
-    let data_offset = ftyp.len() as u32 + mdat_header;
+    let video_offset = ftyp.len() as u32 + mdat_header;
+    let audio_offset = video_offset + video_chunk_size;
 
-    let moov = build_moov(
-        width,
-        height,
-        avcc,
-        &sample_sizes,
-        sample_is_key,
-        data_offset,
-        timescale,
-        sample_delta,
-        samples.len() as u32,
+    let moov = build_moov_av(
+        video,
+        audio,
+        video_offset,
+        audio_offset,
+        &video_sizes,
+        &audio_sizes,
     )?;
 
     let mut out = Vec::new();
@@ -987,55 +1046,86 @@ fn build_mp4(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_moov(
-    width: u16,
-    height: u16,
-    avcc: &[u8],
-    sample_sizes: &[u32],
-    sample_is_key: &[bool],
-    chunk_offset: u32,
-    timescale: u32,
-    sample_delta: u32,
-    sample_count: u32,
+fn build_moov_av(
+    video: &VideoMuxState,
+    audio: Option<&AudioMuxState>,
+    video_offset: u32,
+    audio_offset: u32,
+    video_sizes: &[u32],
+    audio_sizes: &[u32],
 ) -> Result<Vec<u8>> {
-    let delta = sample_delta.max(1);
-    let duration = sample_count.saturating_mul(delta);
+    let v_delta = video.sample_delta.max(1);
+    let v_count = video.samples.len() as u32;
+    let v_dur = v_count.saturating_mul(v_delta);
+    // Movie timescale = video timescale; convert audio duration into it.
+    let movie_timescale = video.timescale.max(1);
+    let movie_duration = if let Some(a) = audio {
+        let a_dur_sec = (a.samples.len() as u64 * u64::from(a.sample_delta)) as f64
+            / f64::from(a.timescale.max(1));
+        let a_dur_ticks = (a_dur_sec * f64::from(movie_timescale)).round() as u32;
+        let v_dur_sec = v_dur as f64 / f64::from(movie_timescale);
+        let v_ticks = (v_dur_sec * f64::from(movie_timescale)).round() as u32;
+        v_ticks.max(a_dur_ticks).max(v_dur)
+    } else {
+        v_dur
+    };
+
+    let next_track = if audio.is_some() { 3u32 } else { 2u32 };
     let mvhd = box_of(b"mvhd", {
         let mut b = vec![0u8; 100];
-        b[0] = 0; // version
-                  // timescale at 12
-        b[12..16].copy_from_slice(&timescale.to_be_bytes());
-        b[16..20].copy_from_slice(&duration.to_be_bytes());
-        b[20..24].copy_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
-        b[24..26].copy_from_slice(&0x0100u16.to_be_bytes()); // volume
-                                                             // matrix identity
+        b[12..16].copy_from_slice(&movie_timescale.to_be_bytes());
+        b[16..20].copy_from_slice(&movie_duration.to_be_bytes());
+        b[20..24].copy_from_slice(&0x00010000u32.to_be_bytes());
+        b[24..26].copy_from_slice(&0x0100u16.to_be_bytes());
         b[36..40].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[52..56].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[68..72].copy_from_slice(&0x40000000u32.to_be_bytes());
-        b[96..100].copy_from_slice(&2u32.to_be_bytes()); // next_track_ID
+        b[96..100].copy_from_slice(&next_track.to_be_bytes());
         b
     });
 
+    let video_trak = build_video_trak(video, video_sizes, video_offset, movie_duration)?;
+    let mut parts = vec![mvhd, video_trak];
+    if let Some(a) = audio {
+        parts.push(build_audio_trak(
+            a,
+            audio_sizes,
+            audio_offset,
+            movie_timescale,
+            movie_duration,
+        )?);
+    }
+    Ok(box_of(b"moov", parts.concat()))
+}
+
+fn build_video_trak(
+    video: &VideoMuxState,
+    sample_sizes: &[u32],
+    chunk_offset: u32,
+    movie_duration: u32,
+) -> Result<Vec<u8>> {
+    let delta = video.sample_delta.max(1);
+    let sample_count = video.samples.len() as u32;
+    let media_duration = sample_count.saturating_mul(delta);
+
     let tkhd = box_of(b"tkhd", {
         let mut b = vec![0u8; 84];
-        b[0] = 0;
-        b[3] = 0x07; // flags: enabled, in movie, in preview
-        b[12..16].copy_from_slice(&1u32.to_be_bytes()); // track_ID
-        b[20..24].copy_from_slice(&duration.to_be_bytes());
+        b[3] = 0x07;
+        b[12..16].copy_from_slice(&1u32.to_be_bytes());
+        b[20..24].copy_from_slice(&movie_duration.to_be_bytes());
         b[40..44].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[56..60].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[72..76].copy_from_slice(&0x40000000u32.to_be_bytes());
-        b[76..80].copy_from_slice(&(u32::from(width) << 16).to_be_bytes());
-        b[80..84].copy_from_slice(&(u32::from(height) << 16).to_be_bytes());
+        b[76..80].copy_from_slice(&(u32::from(video.width) << 16).to_be_bytes());
+        b[80..84].copy_from_slice(&(u32::from(video.height) << 16).to_be_bytes());
         b
     });
 
     let mdhd = box_of(b"mdhd", {
         let mut b = vec![0u8; 24];
-        b[12..16].copy_from_slice(&timescale.to_be_bytes());
-        b[16..20].copy_from_slice(&duration.to_be_bytes());
-        b[20..22].copy_from_slice(&0x55c4u16.to_be_bytes()); // und
+        b[12..16].copy_from_slice(&video.timescale.to_be_bytes());
+        b[16..20].copy_from_slice(&media_duration.to_be_bytes());
+        b[20..22].copy_from_slice(&0x55c4u16.to_be_bytes());
         b
     });
 
@@ -1049,24 +1139,11 @@ fn build_moov(
 
     let vmhd = box_of(b"vmhd", {
         let mut b = vec![0u8; 12];
-        b[3] = 1; // flags
+        b[3] = 1;
         b
     });
-
-    let dref = box_of(b"dref", {
-        let mut b = Vec::new();
-        b.extend_from_slice(&0u32.to_be_bytes()); // version/flags
-        b.extend_from_slice(&1u32.to_be_bytes());
-        b.extend_from_slice(&box_of(b"url ", {
-            let mut u = vec![0u8; 4];
-            u[3] = 1; // self-contained
-            u
-        }));
-        b
-    });
-    let dinf = box_of(b"dinf", dref);
-
-    let avc1 = build_avc1(width, height, avcc)?;
+    let dinf = build_dinf();
+    let avc1 = build_avc1(video.width, video.height, &video.extradata)?;
     let stsd = box_of(b"stsd", {
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
@@ -1074,6 +1151,110 @@ fn build_moov(
         b.extend_from_slice(&avc1);
         b
     });
+    let stbl = build_stbl(
+        &stsd,
+        sample_count,
+        delta,
+        sample_sizes,
+        chunk_offset,
+        Some(&video.sample_is_key),
+    );
+    let minf = box_of(
+        b"minf",
+        [vmhd.as_slice(), dinf.as_slice(), stbl.as_slice()].concat(),
+    );
+    let mdia = box_of(
+        b"mdia",
+        [mdhd.as_slice(), hdlr.as_slice(), minf.as_slice()].concat(),
+    );
+    Ok(box_of(b"trak", [tkhd.as_slice(), mdia.as_slice()].concat()))
+}
+
+fn build_audio_trak(
+    audio: &AudioMuxState,
+    sample_sizes: &[u32],
+    chunk_offset: u32,
+    movie_timescale: u32,
+    movie_duration: u32,
+) -> Result<Vec<u8>> {
+    let delta = audio.sample_delta.max(1);
+    let sample_count = audio.samples.len() as u32;
+    let media_duration = sample_count.saturating_mul(delta);
+    let _ = movie_timescale;
+
+    let tkhd = box_of(b"tkhd", {
+        let mut b = vec![0u8; 84];
+        b[3] = 0x07;
+        b[12..16].copy_from_slice(&2u32.to_be_bytes()); // track_ID
+        b[20..24].copy_from_slice(&movie_duration.to_be_bytes());
+        b[36..38].copy_from_slice(&0x0100u16.to_be_bytes()); // volume
+        b[40..44].copy_from_slice(&0x00010000u32.to_be_bytes());
+        b[56..60].copy_from_slice(&0x00010000u32.to_be_bytes());
+        b[72..76].copy_from_slice(&0x40000000u32.to_be_bytes());
+        b
+    });
+
+    let mdhd = box_of(b"mdhd", {
+        let mut b = vec![0u8; 24];
+        b[12..16].copy_from_slice(&audio.timescale.to_be_bytes());
+        b[16..20].copy_from_slice(&media_duration.to_be_bytes());
+        b[20..22].copy_from_slice(&0x55c4u16.to_be_bytes());
+        b
+    });
+
+    let hdlr = box_of(b"hdlr", {
+        let mut b = vec![0u8; 24];
+        b[8..12].copy_from_slice(b"soun");
+        b.extend_from_slice(b"SoundHandler");
+        b.push(0);
+        b
+    });
+
+    let smhd = box_of(b"smhd", vec![0u8; 8]);
+    let dinf = build_dinf();
+    let mp4a = build_mp4a(audio.sample_rate, audio.channels, &audio.asc)?;
+    let stsd = box_of(b"stsd", {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&mp4a);
+        b
+    });
+    let stbl = build_stbl(&stsd, sample_count, delta, sample_sizes, chunk_offset, None);
+    let minf = box_of(
+        b"minf",
+        [smhd.as_slice(), dinf.as_slice(), stbl.as_slice()].concat(),
+    );
+    let mdia = box_of(
+        b"mdia",
+        [mdhd.as_slice(), hdlr.as_slice(), minf.as_slice()].concat(),
+    );
+    Ok(box_of(b"trak", [tkhd.as_slice(), mdia.as_slice()].concat()))
+}
+
+fn build_dinf() -> Vec<u8> {
+    let dref = box_of(b"dref", {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&box_of(b"url ", {
+            let mut u = vec![0u8; 4];
+            u[3] = 1;
+            u
+        }));
+        b
+    });
+    box_of(b"dinf", dref)
+}
+
+fn build_stbl(
+    stsd: &[u8],
+    sample_count: u32,
+    delta: u32,
+    sample_sizes: &[u32],
+    chunk_offset: u32,
+    sample_is_key: Option<&[bool]>,
+) -> Vec<u8> {
     let stts = box_of(b"stts", {
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
@@ -1086,15 +1267,15 @@ fn build_moov(
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
         b.extend_from_slice(&1u32.to_be_bytes());
-        b.extend_from_slice(&1u32.to_be_bytes()); // first_chunk
+        b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&sample_count.to_be_bytes());
-        b.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
+        b.extend_from_slice(&1u32.to_be_bytes());
         b
     });
     let stsz = box_of(b"stsz", {
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
-        b.extend_from_slice(&0u32.to_be_bytes()); // sample_size
+        b.extend_from_slice(&0u32.to_be_bytes());
         b.extend_from_slice(&(sample_sizes.len() as u32).to_be_bytes());
         for s in sample_sizes {
             b.extend_from_slice(&s.to_be_bytes());
@@ -1108,46 +1289,79 @@ fn build_moov(
         b.extend_from_slice(&chunk_offset.to_be_bytes());
         b
     });
-    // Sync samples: all KEY frames (1-based indices). Ensure at least sample 1.
-    let mut key_indices: Vec<u32> = sample_is_key
-        .iter()
-        .enumerate()
-        .filter_map(|(i, k)| if *k { Some((i + 1) as u32) } else { None })
-        .collect();
-    if key_indices.is_empty() {
-        key_indices.push(1);
-    }
-    let stss = box_of(b"stss", {
-        let mut b = Vec::new();
-        b.extend_from_slice(&0u32.to_be_bytes());
-        b.extend_from_slice(&(key_indices.len() as u32).to_be_bytes());
-        for idx in &key_indices {
-            b.extend_from_slice(&idx.to_be_bytes());
+    let mut boxes = vec![stsd.to_vec(), stts, stsc, stsz, stco];
+    if let Some(keys) = sample_is_key {
+        let mut key_indices: Vec<u32> = keys
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| if *k { Some((i + 1) as u32) } else { None })
+            .collect();
+        if key_indices.is_empty() {
+            key_indices.push(1);
         }
-        b
-    });
-    let stbl = box_of(
-        b"stbl",
-        [
-            stsd.as_slice(),
-            stts.as_slice(),
-            stsc.as_slice(),
-            stsz.as_slice(),
-            stco.as_slice(),
-            stss.as_slice(),
-        ]
-        .concat(),
-    );
-    let minf = box_of(
-        b"minf",
-        [vmhd.as_slice(), dinf.as_slice(), stbl.as_slice()].concat(),
-    );
-    let mdia = box_of(
-        b"mdia",
-        [mdhd.as_slice(), hdlr.as_slice(), minf.as_slice()].concat(),
-    );
-    let trak = box_of(b"trak", [tkhd.as_slice(), mdia.as_slice()].concat());
-    Ok(box_of(b"moov", [mvhd.as_slice(), trak.as_slice()].concat()))
+        boxes.push(box_of(b"stss", {
+            let mut b = Vec::new();
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(&(key_indices.len() as u32).to_be_bytes());
+            for idx in &key_indices {
+                b.extend_from_slice(&idx.to_be_bytes());
+            }
+            b
+        }));
+    }
+    box_of(b"stbl", boxes.concat())
+}
+
+fn build_mp4a(sample_rate: u32, channels: u16, asc: &[u8]) -> Result<Vec<u8>> {
+    let mut body = vec![0u8; 28];
+    body[6..8].copy_from_slice(&1u16.to_be_bytes()); // data_reference_index
+    body[16..18].copy_from_slice(&channels.to_be_bytes());
+    body[18..20].copy_from_slice(&16u16.to_be_bytes()); // sample_size
+    body[24..28].copy_from_slice(&(sample_rate << 16).to_be_bytes());
+    body.extend_from_slice(&build_esds(asc)?);
+    Ok(box_of(b"mp4a", body))
+}
+
+fn build_esds(asc: &[u8]) -> Result<Vec<u8>> {
+    // Minimal ES_Descriptor → DecoderConfigDescriptor → DecoderSpecificInfo + SL.
+    fn desc(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + payload.len());
+        out.push(tag);
+        let len = payload.len();
+        if len < 128 {
+            out.push(len as u8);
+        } else {
+            // 4-byte expandable size
+            out.push(0x80 | ((len >> 21) & 0x7F) as u8);
+            out.push(0x80 | ((len >> 14) & 0x7F) as u8);
+            out.push(0x80 | ((len >> 7) & 0x7F) as u8);
+            out.push((len & 0x7F) as u8);
+        }
+        out.extend_from_slice(payload);
+        out
+    }
+
+    let dsi = desc(0x05, asc);
+    let mut dec_cfg = Vec::new();
+    dec_cfg.push(0x40); // objectTypeIndication Audio ISO/IEC 14496-3
+    dec_cfg.push(0x15); // streamType AudioStream
+    dec_cfg.extend_from_slice(&[0u8; 3]); // bufferSizeDB
+    dec_cfg.extend_from_slice(&128_000u32.to_be_bytes());
+    dec_cfg.extend_from_slice(&128_000u32.to_be_bytes());
+    dec_cfg.extend_from_slice(&dsi);
+    let dec_cfg = desc(0x04, &dec_cfg);
+
+    let sl = desc(0x06, &[0x02]);
+    let mut es = Vec::new();
+    es.extend_from_slice(&0u16.to_be_bytes());
+    es.push(0x00);
+    es.extend_from_slice(&dec_cfg);
+    es.extend_from_slice(&sl);
+    let es = desc(0x03, &es);
+
+    let mut payload = vec![0u8; 4];
+    payload.extend_from_slice(&es);
+    Ok(box_of(b"esds", payload))
 }
 
 fn build_avc1(width: u16, height: u16, avcc: &[u8]) -> Result<Vec<u8>> {

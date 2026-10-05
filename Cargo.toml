@@ -14,7 +14,7 @@ members = [
 default-members = ["crates/rumpeg", "crates/rumpeg-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hdmain/rumpeg"
@@ -22,14 +22,14 @@ authors = ["Rumpeg Contributors"]
 rust-version = "1.85"
 
 [workspace.dependencies]
-rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.0" }
-rumpeg-h264 = { path = "crates/rumpeg-h264", version = "0.1.0" }
-rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.0" }
-rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.0" }
-rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.0" }
-rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.0" }
-rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.0" }
-rumpeg = { path = "crates/rumpeg", version = "0.1.0" }
+rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.1" }
+rumpeg-h264 = { path = "crates/rumpeg-h264", version = "0.1.1" }
+rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.1" }
+rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.1" }
+rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.1" }
+rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.1" }
+rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.1" }
+rumpeg = { path = "crates/rumpeg", version = "0.1.1" }
 thiserror = "2"
 byteorder = "1.5"
 matroska-demuxer = "0.8"

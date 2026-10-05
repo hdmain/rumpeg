@@ -13,6 +13,7 @@
 pub mod filters;
 pub mod graph;
 
+pub use filters::ScaleFilter;
 pub use graph::{Filter, Graph};
 use rumpeg_util::{Frame, Result};
 

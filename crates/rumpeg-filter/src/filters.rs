@@ -182,25 +182,50 @@ impl Filter for FormatFilter {
 
 /// Video scale filter (`scale=640x360` or `scale=640:360`).
 pub struct ScaleFilter {
-    width: u32,
-    height: u32,
+    /// Target width; `0` or negative specials resolved at filter time (`-1`/`-2` = keep aspect).
+    width: i32,
+    /// Target height; same rules as width.
+    height: i32,
 }
 
 impl ScaleFilter {
-    /// Parse size.
+    /// Parse `scale=W:H` / `WxH`. Negative dims keep aspect (`-2` = even).
     pub fn parse(args: &str) -> Result<Self> {
         let args = args.replace('x', ":");
         let (w, h) = args
             .split_once(':')
             .ok_or_else(|| Error::invalid_data("scale expects WIDTHxHEIGHT"))?;
-        Ok(Self {
-            width: w
-                .parse()
-                .map_err(|_| Error::invalid_data("bad scale width"))?,
-            height: h
-                .parse()
-                .map_err(|_| Error::invalid_data("bad scale height"))?,
-        })
+        let width: i32 = w
+            .parse()
+            .map_err(|_| Error::invalid_data("bad scale width"))?;
+        let height: i32 = h
+            .parse()
+            .map_err(|_| Error::invalid_data("bad scale height"))?;
+        if width == 0 && height == 0 {
+            return Err(Error::invalid_data("scale width/height cannot both be 0"));
+        }
+        Ok(Self { width, height })
+    }
+
+    /// Resolved output size for a source frame.
+    pub fn resolve(src_w: u32, src_h: u32, tw: i32, th: i32) -> (u32, u32) {
+        let sw = src_w.max(1) as i64;
+        let sh = src_h.max(1) as i64;
+        let (mut ow, mut oh) = match (tw > 0, th > 0) {
+            (true, true) => (i64::from(tw), i64::from(th)),
+            (true, false) => {
+                let h = (sh * i64::from(tw) + sw / 2) / sw;
+                (i64::from(tw), h)
+            }
+            (false, true) => {
+                let w = (sw * i64::from(th) + sh / 2) / sh;
+                (w, i64::from(th))
+            }
+            (false, false) => (sw, sh),
+        };
+        ow -= ow % 2;
+        oh -= oh % 2;
+        (ow.max(2) as u32, oh.max(2) as u32)
     }
 }
 
@@ -213,13 +238,8 @@ impl Filter for ScaleFilter {
         let Frame::Video(video) = frame else {
             return Err(Error::invalid_data("scale expects video"));
         };
-        let out = transform(
-            &video,
-            video.format,
-            self.width,
-            self.height,
-            FilterMode::Bilinear,
-        )?;
+        let (w, h) = Self::resolve(video.width, video.height, self.width, self.height);
+        let out = transform(&video, video.format, w, h, FilterMode::Bilinear)?;
         Ok(vec![Frame::Video(out)])
     }
 }
