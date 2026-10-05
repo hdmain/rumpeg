@@ -59,8 +59,7 @@ impl Yuv420Planar {
         for row in 0..src.height {
             let sy = (row * src.width) as usize;
             let dy = (row * aw) as usize;
-            dst.y[dy..dy + src.width as usize]
-                .copy_from_slice(&src.y[sy..sy + src.width as usize]);
+            dst.y[dy..dy + src.width as usize].copy_from_slice(&src.y[sy..sy + src.width as usize]);
             // extend right
             let edge = src.y[sy + src.width as usize - 1];
             for x in src.width..aw {

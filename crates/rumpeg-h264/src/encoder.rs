@@ -22,9 +22,7 @@ impl Encoder {
     /// Create an encoder for `width`×`height` display pictures (padded to MBs internally).
     pub fn new(width: u32, height: u32) -> Result<Self> {
         if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
-            return Err(Error::invalid(
-                "width/height must be non-zero even numbers",
-            ));
+            return Err(Error::invalid("width/height must be non-zero even numbers"));
         }
         let sps = Sps::baseline(width, height);
         let pps = Pps::baseline();

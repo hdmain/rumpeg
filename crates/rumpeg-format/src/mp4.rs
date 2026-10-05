@@ -1,4 +1,4 @@
-﻿//! Minimal ISOBMFF / MP4 demuxer + single-frame muxer for `avc1` / H.264.
+//! Minimal ISOBMFF / MP4 demuxer + single-frame muxer for `avc1` / H.264.
 
 use crate::demuxer::Demuxer;
 use crate::io::{IoReader, IoWriter};
@@ -76,11 +76,7 @@ impl Demuxer for Mp4Demuxer {
     }
 
     fn read_packet(&mut self, reader: &mut dyn IoReader) -> Result<Packet> {
-        let sample = self
-            .samples
-            .get(self.index)
-            .ok_or(Error::Eof)?
-            .clone();
+        let sample = self.samples.get(self.index).ok_or(Error::Eof)?.clone();
         reader.seek(SeekFrom::Start(sample.offset))?;
         let mut buf = vec![0u8; sample.size as usize];
         reader.read_exact(&mut buf)?;
@@ -388,7 +384,7 @@ fn parse_stsd_avc1(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize)> {
         return Err(Error::invalid_data("bad avc1 size"));
     }
     let entry = &stsd[i..i + size];
-    // VisualSampleEntry: 6 reserved + data_ref(2) + pre_defined/reserved + width/height at offset 32 from entry start? 
+    // VisualSampleEntry: 6 reserved + data_ref(2) + pre_defined/reserved + width/height at offset 32 from entry start?
     // entry layout: size(4)+type(4)+reserved(6)+data_ref_index(2)+pre_defined(2)+reserved(2)+pre_defined(3*4)+width(2)+height(2)...
     // From start of sample entry (including size/type): width at byte 32, height at 34.
     let width = u16::from_be_bytes(entry[32..34].try_into().unwrap()) as u32;
@@ -596,7 +592,9 @@ impl Muxer for Mp4Muxer {
             return Err(Error::invalid_data("MP4 muxer supports one video stream"));
         }
         if params.codec_id != CodecId::H264 {
-            return Err(Error::unsupported("MP4 muxer currently writes avc1/H.264 only"));
+            return Err(Error::unsupported(
+                "MP4 muxer currently writes avc1/H.264 only",
+            ));
         }
         let video = params
             .video()
@@ -739,12 +737,12 @@ fn build_moov(
     let mvhd = box_of(b"mvhd", {
         let mut b = vec![0u8; 100];
         b[0] = 0; // version
-        // timescale at 12
+                  // timescale at 12
         b[12..16].copy_from_slice(&timescale.to_be_bytes());
         b[16..20].copy_from_slice(&duration.to_be_bytes());
         b[20..24].copy_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
         b[24..26].copy_from_slice(&0x0100u16.to_be_bytes()); // volume
-        // matrix identity
+                                                             // matrix identity
         b[36..40].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[52..56].copy_from_slice(&0x00010000u32.to_be_bytes());
         b[68..72].copy_from_slice(&0x40000000u32.to_be_bytes());
@@ -862,8 +860,14 @@ fn build_moov(
         ]
         .concat(),
     );
-    let minf = box_of(b"minf", [vmhd.as_slice(), dinf.as_slice(), stbl.as_slice()].concat());
-    let mdia = box_of(b"mdia", [mdhd.as_slice(), hdlr.as_slice(), minf.as_slice()].concat());
+    let minf = box_of(
+        b"minf",
+        [vmhd.as_slice(), dinf.as_slice(), stbl.as_slice()].concat(),
+    );
+    let mdia = box_of(
+        b"mdia",
+        [mdhd.as_slice(), hdlr.as_slice(), minf.as_slice()].concat(),
+    );
     let trak = box_of(b"trak", [tkhd.as_slice(), mdia.as_slice()].concat());
     Ok(box_of(b"moov", [mvhd.as_slice(), trak.as_slice()].concat()))
 }
@@ -880,7 +884,7 @@ fn build_avc1(width: u16, height: u16, avcc: &[u8]) -> Result<Vec<u8>> {
     body[28..32].copy_from_slice(&0x00480000u32.to_be_bytes()); // horiz resolution 72 dpi
     body[32..36].copy_from_slice(&0x00480000u32.to_be_bytes());
     body[40..42].copy_from_slice(&1u16.to_be_bytes()); // frame_count
-    // compressor name (32 bytes) already zero
+                                                       // compressor name (32 bytes) already zero
     body[74..76].copy_from_slice(&0x0018u16.to_be_bytes()); // depth
     body[76..78].copy_from_slice(&0xffffu16.to_be_bytes());
     let avcc_box = box_of(b"avcC", avcc.to_vec());

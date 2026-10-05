@@ -147,8 +147,7 @@ fn cmd_convert(
     ar: Option<u32>,
     sample_fmt: Option<&str>,
 ) -> Result<()> {
-    let prefer_video =
-        is_jpeg_output(output) || frames.is_some() || video_filter.is_some();
+    let prefer_video = is_jpeg_output(output) || frames.is_some() || video_filter.is_some();
     if prefer_video {
         return try_convert_video(input, output, video_filter, frames.or(Some(1)));
     }

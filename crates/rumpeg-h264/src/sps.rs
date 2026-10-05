@@ -144,7 +144,10 @@ impl Sps {
         let sps_id = r.read_ue()?;
 
         // High profiles carry extra fields — skip if present.
-        if matches!(profile_idc, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        if matches!(
+            profile_idc,
+            100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+        ) {
             let chroma_format_idc = r.read_ue()?;
             if chroma_format_idc == 3 {
                 let _ = r.read_flag()?; // separate_colour_plane_flag

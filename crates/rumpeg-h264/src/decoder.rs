@@ -160,7 +160,12 @@ impl Default for Decoder {
     }
 }
 
-fn read_pcm_mb(r: &mut BitReader<'_>, frame: &mut Yuv420Planar, mb_x: u32, mb_y: u32) -> Result<()> {
+fn read_pcm_mb(
+    r: &mut BitReader<'_>,
+    frame: &mut Yuv420Planar,
+    mb_x: u32,
+    mb_y: u32,
+) -> Result<()> {
     let stride = frame.width as usize;
     let origin = (mb_y * 16 * frame.width + mb_x * 16) as usize;
     for row in 0..16 {

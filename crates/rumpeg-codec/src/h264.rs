@@ -156,8 +156,7 @@ impl H264Encoder {
                 ));
             }
         };
-        let inner =
-            rumpeg_h264::Encoder::new(video.width, video.height).map_err(map_h264)?;
+        let inner = rumpeg_h264::Encoder::new(video.width, video.height).map_err(map_h264)?;
         Ok(Self {
             inner,
             pending: VecDeque::new(),
@@ -219,9 +218,7 @@ impl Encoder for H264Encoder {
 
 fn map_h264(err: rumpeg_h264::Error) -> Error {
     match err {
-        rumpeg_h264::Error::Truncated(m) | rumpeg_h264::Error::Invalid(m) => {
-            Error::invalid_data(m)
-        }
+        rumpeg_h264::Error::Truncated(m) | rumpeg_h264::Error::Invalid(m) => Error::invalid_data(m),
         rumpeg_h264::Error::Unsupported(m) => Error::unsupported(m),
     }
 }
