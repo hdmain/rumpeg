@@ -1,0 +1,17 @@
+[package]
+name = "rumpeg-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Core types, buffers, and media primitives for Rumpeg (libavutil counterpart)"
+keywords = ["multimedia", "ffmpeg", "audio", "video"]
+categories = ["multimedia", "encoding"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

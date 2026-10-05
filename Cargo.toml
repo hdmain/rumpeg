@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rumpeg-util",
+    "crates/rumpeg-codec",
+    "crates/rumpeg-format",
+    "crates/rumpeg-scale",
+    "crates/rumpeg-resample",
+    "crates/rumpeg-filter",
+    "crates/rumpeg",
+    "crates/rumpeg-cli",
+]
+default-members = ["crates/rumpeg", "crates/rumpeg-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hdmain/rumpeg"
+authors = ["Rumpeg Contributors"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.0" }
+rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.0" }
+rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.0" }
+rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.0" }
+rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.0" }
+rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.0" }
+rumpeg = { path = "crates/rumpeg", version = "0.1.0" }
+thiserror = "2"
+byteorder = "1.5"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

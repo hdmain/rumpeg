@@ -1,0 +1,19 @@
+[package]
+name = "rumpeg-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Command-line tools for Rumpeg (ffmpeg/ffprobe-style)"
+keywords = ["multimedia", "cli"]
+categories = ["command-line-utilities", "multimedia"]
+
+[[bin]]
+name = "rumpeg"
+path = "src/main.rs"
+
+[dependencies]
+rumpeg = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,28 @@
+[package]
+name = "rumpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "High-performance multimedia framework in Rust — FFmpeg-inspired library crate"
+keywords = ["multimedia", "ffmpeg", "audio", "video", "codec"]
+categories = ["multimedia", "encoding"]
+readme = "../../README.md"
+
+[dependencies]
+rumpeg-util = { workspace = true }
+rumpeg-codec = { workspace = true }
+rumpeg-format = { workspace = true }
+rumpeg-scale = { workspace = true }
+rumpeg-resample = { workspace = true }
+rumpeg-filter = { workspace = true }
+
+[[example]]
+name = "decode_wav"
+path = "../../examples/decode_wav.rs"
+
+[[example]]
+name = "generate_wav"
+path = "../../examples/generate_wav.rs"
