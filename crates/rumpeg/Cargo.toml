@@ -11,6 +11,13 @@ keywords = ["multimedia", "ffmpeg", "audio", "video", "codec"]
 categories = ["multimedia", "encoding"]
 readme = "../../README.md"
 
+[features]
+default = []
+## System libx264 (`-c:v libx264`). Needs pkg-config + libx264.
+encode-x264 = ["rumpeg-codec/encode-x264"]
+## NVIDIA NVENC (`-c:v h264_nvenc`). Windows + NVIDIA driver.
+encode-nvenc = ["rumpeg-codec/encode-nvenc"]
+
 [dependencies]
 rumpeg-util = { workspace = true }
 rumpeg-h264 = { workspace = true }

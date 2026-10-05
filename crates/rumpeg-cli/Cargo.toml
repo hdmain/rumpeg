@@ -14,6 +14,11 @@ categories = ["command-line-utilities", "multimedia"]
 name = "rumpeg"
 path = "src/main.rs"
 
+[features]
+default = []
+encode-x264 = ["rumpeg/encode-x264"]
+encode-nvenc = ["rumpeg/encode-nvenc"]
+
 [dependencies]
 rumpeg = { workspace = true }
 clap = { workspace = true }

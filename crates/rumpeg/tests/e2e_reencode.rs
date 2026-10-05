@@ -99,16 +99,7 @@ fn reencode(
     out_params.quality = quality;
     out_params.bit_rate = bit_rate;
     out_params.gop_size = gop;
-    {
-        let v = out_params.video().unwrap();
-        let enc = rumpeg::h264::Encoder::with_mode(
-            v.width.max(16),
-            v.height.max(16),
-            rumpeg::h264::IntraMode::I16x16Cavlc,
-        )
-        .map_err(map_h264)?;
-        out_params.extradata = enc.avcc_extradata().map_err(map_h264)?;
-    }
+    out_params.encode_preset = "fast".into();
 
     let mut graph = vf.map(Graph::parse).transpose()?.unwrap_or_default();
     graph.set_fps_source(source_fps);
@@ -119,11 +110,13 @@ fn reencode(
     }
 
     let mut encoder = codec::open_encoder(&out_params)?;
+    out_params.extradata = encoder.params().extradata.clone();
     let mut muxer = format::open_output(output, Some("mp4"))?;
     let out_index = muxer.add_stream(out_params)?;
     muxer.write_header()?;
 
     let mut encoded = 0u64;
+    let mut packets_written = 0u64;
     loop {
         let packet = match demuxer.read_packet() {
             Ok(p) => p,
@@ -138,6 +131,7 @@ fn reencode(
                 for mut pkt in encoder.encode(&frame)? {
                     pkt.stream_index = out_index;
                     muxer.write_packet(&pkt)?;
+                    packets_written += 1;
                 }
                 encoded += 1;
             }
@@ -151,6 +145,7 @@ fn reencode(
                     for mut pkt in encoder.encode(&frame)? {
                         pkt.stream_index = out_index;
                         muxer.write_packet(&pkt)?;
+                        packets_written += 1;
                     }
                     encoded += 1;
                 }
@@ -165,13 +160,15 @@ fn reencode(
             Ok(mut pkt) => {
                 pkt.stream_index = out_index;
                 muxer.write_packet(&pkt)?;
+                packets_written += 1;
             }
             Err(Error::Eof) | Err(Error::NeedMoreData) => break,
             Err(e) => return Err(e),
         }
     }
     muxer.write_trailer()?;
-    Ok(encoded)
+    let _ = encoded;
+    Ok(packets_written)
 }
 
 #[test]

@@ -5,8 +5,8 @@
 //! The send/receive API mirrors FFmpeg's `avcodec_send_packet` /
 //! `avcodec_receive_frame` model.
 //!
-//! All codecs registered here are pure-Rust (no C FFI). AV1 and VP8 are not
-//! registered until a working decode path exists.
+//! Default H.264 encode uses pure-Rust `rusty_h264-encoder` (ME / CABAC / ABR).
+//! Optional Cargo features: `encode-x264`, `encode-nvenc`.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]

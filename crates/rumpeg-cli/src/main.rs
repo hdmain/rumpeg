@@ -56,13 +56,16 @@ enum Commands {
         /// Codec name (`copy` remuxes without re-encode when possible).
         #[arg(short = 'c')]
         codec: Option<String>,
-        /// Video codec name.
+        /// Video codec name (`h264`, `libx264`, `h264_nvenc`, `native`, `mjpeg`, …).
         #[arg(long = "c:v")]
         codec_video: Option<String>,
         /// Audio codec name.
         #[arg(long = "c:a")]
         codec_audio: Option<String>,
-        /// Video bitrate (e.g. `500k`, `1500k`, `2000000`). Maps to QP heuristically.
+        /// Encoder speed preset (`fast`, `medium`, `slow`, …).
+        #[arg(long = "preset")]
+        preset: Option<String>,
+        /// Video bitrate (e.g. `500k`, `1500k`, `2000000`). ABR for rusty_h264 / NVENC / x264.
         #[arg(long = "b:v", visible_alias = "bitrate")]
         bit_rate_video: Option<String>,
         /// Audio bitrate (e.g. `128k`). Used when muxing AAC into MP4.
@@ -118,6 +121,7 @@ fn run(cli: Cli) -> Result<()> {
             codec,
             codec_video,
             codec_audio,
+            preset,
             bit_rate_video,
             bit_rate_audio,
             crf,
@@ -138,6 +142,7 @@ fn run(cli: Cli) -> Result<()> {
             codec.as_deref(),
             codec_video.as_deref(),
             codec_audio.as_deref(),
+            preset.as_deref(),
             bit_rate_video.as_deref(),
             bit_rate_audio.as_deref(),
             crf,
@@ -242,6 +247,7 @@ fn cmd_convert(
     codec: Option<&str>,
     codec_video: Option<&str>,
     codec_audio: Option<&str>,
+    preset: Option<&str>,
     bit_rate_video: Option<&str>,
     bit_rate_audio: Option<&str>,
     crf: Option<f32>,
@@ -253,6 +259,7 @@ fn cmd_convert(
     let video_filter = merge_vf_fps(video_filter, fps)?;
     let mut video_filter = video_filter;
     let mut bit_rate_video = bit_rate_video.map(|s| s.to_string());
+    let mut encode_preset = preset.map(|s| s.to_string());
 
     if fast {
         if !vf_has_scale(video_filter.as_deref()) {
@@ -264,8 +271,11 @@ fn cmd_convert(
         if bit_rate_video.is_none() && crf.is_none() && qp.is_none() {
             bit_rate_video = Some("800k".to_string());
         }
+        if encode_preset.is_none() {
+            encode_preset = Some("fast".to_string());
+        }
         eprintln!(
-            "rumpeg: --fast → scale≤640 + bitrate heuristic (override with --vf / -b:v / --crf)"
+            "rumpeg: --fast → scale≤640 + bitrate + preset=fast (override with --vf / -b:v / --preset)"
         );
     }
 
@@ -288,8 +298,11 @@ fn cmd_convert(
                         None => "scale=640:-2".to_string(),
                     });
                     bit_rate_video = Some("800k".to_string());
+                    if encode_preset.is_none() {
+                        encode_preset = Some("fast".to_string());
+                    }
                     eprintln!(
-                        "rumpeg: auto scale=640:-2 -b:v 800k for speed (use --vf / -b:v to override)"
+                        "rumpeg: auto scale=640:-2 -b:v 800k --preset fast (use --vf / -b:v to override)"
                     );
                 }
             }
@@ -298,13 +311,20 @@ fn cmd_convert(
 
     let video_filter = video_filter.as_deref();
     let bit_rate_video = bit_rate_video.as_deref();
+    let encode_preset = encode_preset.as_deref();
 
     let reencode_video = fps.is_some()
         || bit_rate_video.is_some()
         || crf.is_some()
         || qp.is_some()
         || gop.is_some()
-        || fast;
+        || fast
+        || codec_video.is_some_and(|c| {
+            matches!(
+                c.to_ascii_lowercase().as_str(),
+                "h264" | "libx264" | "h264_nvenc" | "nvenc" | "native" | "x264"
+            )
+        });
 
     if let Some(()) = try_remux_copy(
         input,
@@ -338,6 +358,7 @@ fn cmd_convert(
             frame_limit,
             map,
             codec_video.or(codec),
+            encode_preset,
             bit_rate_video,
             bit_rate_audio,
             crf,
@@ -359,6 +380,7 @@ fn cmd_convert(
             frames,
             map,
             codec_video.or(codec),
+            encode_preset,
             bit_rate_video,
             bit_rate_audio,
             crf,
@@ -453,6 +475,7 @@ fn try_convert_video(
     frames: Option<u64>,
     map: Option<&str>,
     codec_name: Option<&str>,
+    encode_preset: Option<&str>,
     bit_rate_video: Option<&str>,
     bit_rate_audio: Option<&str>,
     crf: Option<f32>,
@@ -518,8 +541,13 @@ fn try_convert_video(
             },
         )
     } else if let Some(name) = codec_name.filter(|c| !is_copy_codec(c)) {
-        let video = in_stream.codec_params.video().cloned().unwrap_or_default();
-        CodecParams::video_codec(parse_video_codec_name(name)?, video)
+        let mut video = in_stream.codec_params.video().cloned().unwrap_or_default();
+        if parse_video_codec_name(name)? == CodecId::H264 {
+            video.pix_fmt = PixelFormat::Yuv420p;
+        }
+        let mut p = CodecParams::video_codec(parse_video_codec_name(name)?, video);
+        p.encoder_name = name.to_string();
+        p
     } else {
         let mut video = in_stream.codec_params.video().cloned().unwrap_or_default();
         let codec_id = if is_mp4_output(output)
@@ -562,6 +590,9 @@ fn try_convert_video(
     } else if out_params.codec_id == CodecId::H264 && out_params.gop_size == 0 {
         out_params.gop_size = 30;
     }
+    if let Some(p) = encode_preset {
+        out_params.encode_preset = p.to_string();
+    }
     let _ = quality_video;
 
     let mut graph = video_filter
@@ -576,19 +607,9 @@ fn try_convert_video(
         }
     }
 
-    if out_params.codec_id == CodecId::H264 && out_params.extradata.is_empty() {
-        if let Some(v) = out_params.video() {
-            if let Ok(enc) = rumpeg::h264::Encoder::with_mode(
-                v.width.max(16),
-                v.height.max(16),
-                rumpeg::h264::IntraMode::I16x16Cavlc,
-            ) {
-                out_params.extradata = enc.avcc_extradata().unwrap_or_default();
-            }
-        }
-    }
-
     let mut encoder = codec::open_encoder(&out_params)?;
+    // Prefer avcC produced by the real encoder backend (rusty_h264 / x264 / NVENC).
+    out_params.extradata = encoder.params().extradata.clone();
     let format_hint = if still_codec.is_some() {
         Some("image2")
     } else {
@@ -882,7 +903,9 @@ fn parse_bit_rate(s: &str) -> Result<u64> {
 
 fn parse_video_codec_name(name: &str) -> Result<CodecId> {
     match name.to_ascii_lowercase().as_str() {
-        "h264" | "libx264" | "avc" => Ok(CodecId::H264),
+        "h264" | "libx264" | "x264" | "h264_nvenc" | "nvenc" | "native" | "rumpeg" | "avc" => {
+            Ok(CodecId::H264)
+        }
         "mjpeg" | "jpeg" => Ok(CodecId::Mjpeg),
         "png" => Ok(CodecId::Png),
         "rawvideo" => Ok(CodecId::RawVideo),

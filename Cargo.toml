@@ -14,7 +14,7 @@ members = [
 default-members = ["crates/rumpeg", "crates/rumpeg-cli"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hdmain/rumpeg"
@@ -22,14 +22,14 @@ authors = ["Rumpeg Contributors"]
 rust-version = "1.85"
 
 [workspace.dependencies]
-rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.1" }
-rumpeg-h264 = { path = "crates/rumpeg-h264", version = "0.1.1" }
-rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.1" }
-rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.1" }
-rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.1" }
-rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.1" }
-rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.1" }
-rumpeg = { path = "crates/rumpeg", version = "0.1.1" }
+rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.2" }
+rumpeg-h264 = { path = "crates/rumpeg-h264", version = "0.1.2" }
+rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.2" }
+rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.2" }
+rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.2" }
+rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.2" }
+rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.2" }
+rumpeg = { path = "crates/rumpeg", version = "0.1.2" }
 thiserror = "2"
 byteorder = "1.5"
 matroska-demuxer = "0.8"
@@ -47,6 +47,12 @@ rusty-opus = "1.0"
 # AV1 (rav1d) deferred — only a C-ABI surface today; not registered until wrapped.
 rusty_h265 = { version = "0.6", default-features = false }
 rusty_vp9 = "0.1"
+# H.264 encode: pure-Rust ME/CABAC/ABR (no OpenH264 asm FFI)
+rusty_h264-encoder = { version = "0.16", default-features = false, features = ["std", "global-alloc"] }
+rusty_h264-common = { version = "0.16", default-features = false, features = ["std", "global-alloc"] }
+# Optional FFI encoders (feature-gated in rumpeg-codec)
+x264 = "0.5"
+nvenc = "0.1"
 
 [profile.release]
 lto = "thin"

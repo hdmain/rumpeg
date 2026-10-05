@@ -410,6 +410,12 @@ pub struct CodecParams {
     pub quality: i32,
     /// GOP / IDR interval hint (`0` = codec default).
     pub gop_size: u32,
+    /// Encoder implementation hint (`""` = auto).
+    ///
+    /// H.264: `h264` / `libx264` / `h264_nvenc` / `native`.
+    pub encoder_name: String,
+    /// Speed/quality preset hint (`""` = default): e.g. `fast`, `medium`, `slow`.
+    pub encode_preset: String,
     /// Type-specific parameters.
     pub specific: CodecSpecific,
 }
@@ -433,6 +439,8 @@ impl Default for CodecParams {
             bit_rate: 0,
             quality: -1,
             gop_size: 0,
+            encoder_name: String::new(),
+            encode_preset: String::new(),
             specific: CodecSpecific::None,
         }
     }
@@ -480,6 +488,8 @@ impl CodecParams {
             bit_rate: 0,
             quality: -1,
             gop_size: 0,
+            encoder_name: String::new(),
+            encode_preset: String::new(),
             specific: CodecSpecific::Audio(audio),
         }
     }
@@ -492,6 +502,8 @@ impl CodecParams {
             bit_rate: 0,
             quality: -1,
             gop_size: 0,
+            encoder_name: String::new(),
+            encode_preset: String::new(),
             specific: CodecSpecific::Video(video),
         }
     }

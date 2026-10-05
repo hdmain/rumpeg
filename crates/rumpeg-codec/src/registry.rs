@@ -89,7 +89,7 @@ impl Registry {
             CodecDescriptor {
                 id: CodecId::H264,
                 name: "h264",
-                long_name: "H.264 / AVC (pure-Rust CABAC+CAVLC decode; Intra encode)",
+                long_name: "H.264 / AVC (CABAC decode; rusty_h264 ME/CABAC/ABR encode; optional libx264/NVENC)",
                 media_type: MediaType::Video,
                 kind: CodecKind::Both,
             },

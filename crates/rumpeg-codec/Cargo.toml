@@ -10,6 +10,13 @@ description = "Codec framework and implementations for Rumpeg (libavcodec counte
 keywords = ["multimedia", "codec", "decoder", "encoder"]
 categories = ["multimedia", "encoding"]
 
+[features]
+default = []
+## Link system libx264 (needs pkg-config + libx264). Select with `-c:v libx264`.
+encode-x264 = ["dep:x264"]
+## NVIDIA NVENC (Windows DX11 + nvEncodeAPI). Select with `-c:v h264_nvenc`.
+encode-nvenc = ["dep:nvenc", "dep:windows"]
+
 [dependencies]
 rumpeg-util = { workspace = true }
 rumpeg-h264 = { workspace = true }
@@ -24,3 +31,15 @@ rusty_aac = { workspace = true }
 rusty-opus = { workspace = true }
 rusty_h265 = { workspace = true }
 rusty_vp9 = { workspace = true }
+rusty_h264-encoder = { workspace = true }
+rusty_h264-common = { workspace = true }
+x264 = { workspace = true, optional = true }
+nvenc = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+] }

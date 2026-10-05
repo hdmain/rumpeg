@@ -37,26 +37,32 @@ pub struct EncoderContext {
 impl EncoderContext {
     /// Open an encoder matching `params.codec_id`.
     pub fn open(params: &CodecParams) -> Result<Self> {
+        let mut params = params.clone();
         let inner: Box<dyn Encoder> = match params.codec_id {
             CodecId::PcmS16Le
             | CodecId::PcmS24Le
             | CodecId::PcmS32Le
             | CodecId::PcmF32Le
-            | CodecId::PcmU8 => Box::new(PcmEncoder::new(params)?),
-            CodecId::RawVideo => Box::new(RawVideoEncoder::new(params)?),
-            CodecId::H264 => Box::new(H264Encoder::new(params)?),
-            CodecId::Mjpeg => Box::new(JpegEncoderCodec::new(params)?),
-            CodecId::Png => Box::new(PngEncoderCodec::new(params)?),
-            CodecId::Flac => Box::new(FlacEncoder::new(params)?),
-            CodecId::Mp3 => Box::new(Mp3EncoderCodec::new(params)?),
-            CodecId::Aac => Box::new(AacEncoderCodec::new(params)?),
-            CodecId::Opus => Box::new(OpusEncoderCodec::new(params)?),
+            | CodecId::PcmU8 => Box::new(PcmEncoder::new(&params)?),
+            CodecId::RawVideo => Box::new(RawVideoEncoder::new(&params)?),
+            CodecId::H264 => {
+                let enc = H264Encoder::new(&params)?;
+                if let Ok(extra) = enc.extradata() {
+                    if !extra.is_empty() {
+                        params.extradata = extra;
+                    }
+                }
+                Box::new(enc)
+            }
+            CodecId::Mjpeg => Box::new(JpegEncoderCodec::new(&params)?),
+            CodecId::Png => Box::new(PngEncoderCodec::new(&params)?),
+            CodecId::Flac => Box::new(FlacEncoder::new(&params)?),
+            CodecId::Mp3 => Box::new(Mp3EncoderCodec::new(&params)?),
+            CodecId::Aac => Box::new(AacEncoderCodec::new(&params)?),
+            CodecId::Opus => Box::new(OpusEncoderCodec::new(&params)?),
             other => return Err(Error::not_found(format!("encoder for {other}"))),
         };
-        Ok(Self {
-            inner,
-            params: params.clone(),
-        })
+        Ok(Self { inner, params })
     }
 
     /// Parameters used to open this encoder.
