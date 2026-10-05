@@ -6,11 +6,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Pure-Rust H.264 Baseline codec (I_PCM Intra frames) — Rumpeg's OpenH264 analogue"
+description = "Pure-Rust H.264 codec for Rumpeg — CABAC/CAVLC decode via rusty_h264-decoder; Intra I_PCM/I_16x16 encode"
 keywords = ["h264", "avc", "video", "codec", "pure-rust"]
 categories = ["multimedia", "encoding"]
 
 [dependencies]
 thiserror = { workspace = true }
+rusty_h264-decoder = { workspace = true }
 
 [dev-dependencies]

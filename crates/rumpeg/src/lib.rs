@@ -3,8 +3,9 @@
 //! A high-performance multimedia framework written in Rust, inspired by
 //! [FFmpeg](https://ffmpeg.org/)'s library architecture.
 //!
-//! H.264 support is provided by the pure-Rust [`rumpeg_h264`] crate (Baseline
-//! `I_PCM`) — **not** Cisco OpenH264 C/C++ FFI.
+//! H.264 support: decode via pure-Rust [`rusty_h264_decoder`] (CABAC + CAVLC)
+//! wrapped by [`rumpeg_h264`]; encode via Rumpeg Baseline Intra — **not**
+//! Cisco OpenH264 C/C++ FFI.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]

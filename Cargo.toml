@@ -19,7 +19,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hdmain/rumpeg"
 authors = ["Rumpeg Contributors"]
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
 rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.0" }
@@ -32,9 +32,21 @@ rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.0" }
 rumpeg = { path = "crates/rumpeg", version = "0.1.0" }
 thiserror = "2"
 byteorder = "1.5"
+matroska-demuxer = "0.8"
 tracing = "0.1"
 clap = { version = "4", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "global-alloc"] }
+# Pure-Rust audio
+claxon = "0.4"
+flacenc = { version = "0.5", default-features = false, features = ["serde"] }
+rusty_mp3 = "1.0"
+rusty_aac = { version = "1.1", default-features = false }
+rusty-opus = "1.0"
+# Pure-Rust video
+# AV1 (rav1d) deferred — only a C-ABI surface today; not registered until wrapped.
+rusty_h265 = { version = "0.6", default-features = false }
+rusty_vp9 = "0.1"
 
 [profile.release]
 lto = "thin"

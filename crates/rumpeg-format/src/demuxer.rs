@@ -1,8 +1,11 @@
 //! Demuxer trait and input format context.
 
 use crate::h264raw::H264RawDemuxer;
+use crate::image2::Image2Demuxer;
 use crate::io::{IoReader, MediaIo};
+use crate::matroska::MatroskaDemuxer;
 use crate::mp4::Mp4Demuxer;
+use crate::mpegts::MpegTsDemuxer;
 use crate::probe;
 use crate::stream::Stream;
 use crate::wav::WavDemuxer;
@@ -45,6 +48,9 @@ impl FormatContext {
         let demuxer: Box<dyn Demuxer> = match probed.format_name {
             "wav" => Box::new(WavDemuxer::open(&mut io)?),
             "mp4" => Box::new(Mp4Demuxer::open(&mut io)?),
+            "matroska" | "webm" => Box::new(MatroskaDemuxer::open(&mut io)?),
+            "mpegts" | "ts" => Box::new(MpegTsDemuxer::open(&mut io)?),
+            "image2" => Box::new(Image2Demuxer::open(&mut io)?),
             "h264" => Box::new(H264RawDemuxer::open(&mut io)?),
             other => {
                 return Err(Error::unsupported(format!(

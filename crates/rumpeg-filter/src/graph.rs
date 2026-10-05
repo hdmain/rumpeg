@@ -1,6 +1,10 @@
 //! Filter graph construction and execution.
 
-use crate::filters::{AFormatFilter, FormatFilter, ScaleFilter, VolumeFilter};
+use crate::filters::{
+    AFormatFilter, AresampleFilter, CropFilter, EqFilter, FormatFilter, FpsFilter, FramestepFilter,
+    HFlipFilter, HueFilter, OverlayFilter, PadFilter, ScaleFilter, TransposeFilter, VFlipFilter,
+    VolumeFilter,
+};
 use rumpeg_util::{Error, Frame, Result};
 
 /// A single filter node.
@@ -9,6 +13,12 @@ pub trait Filter: Send {
     fn name(&self) -> &str;
     /// Process one frame into zero or more output frames (usually one).
     fn filter(&mut self, frame: Frame) -> Result<Vec<Frame>>;
+    /// Optional: set source frame rate for rate-conversion filters.
+    fn set_source_fps(&mut self, _source_fps: u32) {}
+    /// Optional: report a target output frame rate (fps filter).
+    fn target_fps(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Ordered chain of filters.
@@ -46,8 +56,16 @@ impl Graph {
         self.filters.push(filter);
     }
 
-    /// Run the graph on a single frame.
+    /// Run the graph on a single frame (requires ≥1 output).
     pub fn run(&mut self, frame: Frame) -> Result<Frame> {
+        self.run_all(frame)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::invalid_data("filter graph produced no frames"))
+    }
+
+    /// Run the graph; may return zero frames (e.g. fps drop / framestep).
+    pub fn run_all(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         let mut frames = vec![frame];
         for filter in &mut self.filters {
             let mut next = Vec::new();
@@ -56,10 +74,19 @@ impl Graph {
             }
             frames = next;
         }
-        frames
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::invalid_data("filter graph produced no frames"))
+        Ok(frames)
+    }
+
+    /// Set source fps on any `fps` filters in the graph.
+    pub fn set_fps_source(&mut self, source_fps: u32) {
+        for f in &mut self.filters {
+            f.set_source_fps(source_fps);
+        }
+    }
+
+    /// Target fps from the last `fps` filter in the chain, if any.
+    pub fn target_fps(&self) -> Option<u32> {
+        self.filters.iter().rev().find_map(|f| f.target_fps())
     }
 }
 
@@ -79,6 +106,17 @@ fn parse_one(spec: &str) -> Result<Box<dyn Filter>> {
         "aformat" => Box::new(AFormatFilter::parse(args)?),
         "format" => Box::new(FormatFilter::parse(args)?),
         "scale" => Box::new(ScaleFilter::parse(args)?),
+        "hflip" => Box::new(HFlipFilter::parse(args)?),
+        "vflip" => Box::new(VFlipFilter::parse(args)?),
+        "crop" => Box::new(CropFilter::parse(args)?),
+        "pad" => Box::new(PadFilter::parse(args)?),
+        "transpose" => Box::new(TransposeFilter::parse(args)?),
+        "fps" => Box::new(FpsFilter::parse(args)?),
+        "framestep" => Box::new(FramestepFilter::parse(args)?),
+        "eq" => Box::new(EqFilter::parse(args)?),
+        "hue" => Box::new(HueFilter::parse(args)?),
+        "aresample" => Box::new(AresampleFilter::parse(args)?),
+        "overlay" => Box::new(OverlayFilter::parse(args)?),
         "null" | "anull" => Box::new(NullFilter),
         other => {
             return Err(Error::not_found(format!("filter '{other}'")));
@@ -94,5 +132,50 @@ impl Filter for NullFilter {
     }
     fn filter(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         Ok(vec![frame])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rumpeg_util::{Frame, PixelFormat, VideoFrame};
+
+    fn rgb2(w: u32, h: u32, pixels: &[(u8, u8, u8)]) -> VideoFrame {
+        let mut f = VideoFrame::alloc(PixelFormat::Rgb24, w, h);
+        let plane = f.plane_mut(0).unwrap();
+        for (i, (r, g, b)) in pixels.iter().enumerate() {
+            let o = i * 3;
+            plane[o] = *r;
+            plane[o + 1] = *g;
+            plane[o + 2] = *b;
+        }
+        f
+    }
+
+    #[test]
+    fn graph_parses_crop_and_crops_frame() {
+        let mut graph = Graph::parse("crop=1:1:1:0").unwrap();
+        let src = rgb2(2, 1, &[(10, 20, 30), (40, 50, 60)]);
+        let out = graph.run(Frame::Video(src)).unwrap();
+        let Frame::Video(v) = out else {
+            panic!("expected video");
+        };
+        assert_eq!(v.width, 1);
+        assert_eq!(v.height, 1);
+        let p = v.plane(0).unwrap();
+        assert_eq!(&p[..3], &[40, 50, 60]);
+    }
+
+    #[test]
+    fn graph_parses_vflip_and_flips_rows() {
+        let mut graph = Graph::parse("vflip").unwrap();
+        let src = rgb2(1, 2, &[(1, 2, 3), (4, 5, 6)]);
+        let out = graph.run(Frame::Video(src)).unwrap();
+        let Frame::Video(v) = out else {
+            panic!("expected video");
+        };
+        let p = v.plane(0).unwrap();
+        assert_eq!(&p[..3], &[4, 5, 6]);
+        assert_eq!(&p[3..6], &[1, 2, 3]);
     }
 }

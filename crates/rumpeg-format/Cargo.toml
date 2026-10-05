@@ -16,3 +16,4 @@ rumpeg-h264 = { workspace = true }
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+matroska-demuxer = { workspace = true }

@@ -6,8 +6,8 @@ use crate::muxer::Muxer;
 use crate::stream::Stream;
 use byteorder::{BigEndian, ReadBytesExt};
 use rumpeg_util::{
-    Buffer, CodecId, CodecParams, Error, Packet, PacketFlags, PixelFormat, Rational, Result,
-    Timestamp, VideoParams,
+    AudioParams, Buffer, ChannelLayout, CodecId, CodecParams, Error, Packet, PacketFlags,
+    PixelFormat, Rational, Result, SampleFormat, Timestamp, VideoParams,
 };
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -22,18 +22,18 @@ pub fn probe_score(buf: &[u8]) -> u32 {
 
 #[derive(Clone, Debug)]
 struct SampleEntry {
+    stream_index: usize,
     offset: u64,
     size: u32,
     cts: i64,
     is_key: bool,
 }
 
-/// MP4 demuxer for a single H.264 video track.
+/// MP4 demuxer (`avc1` video and optional `mp4a` AAC).
 pub struct Mp4Demuxer {
     streams: Vec<Stream>,
     samples: Vec<SampleEntry>,
     index: usize,
-    length_size: usize,
 }
 
 impl Mp4Demuxer {
@@ -43,25 +43,10 @@ impl Mp4Demuxer {
         let mut file = Vec::new();
         reader.read_to_end(&mut file)?;
         let parsed = parse_mp4(&file)?;
-        let mut params = CodecParams::video_codec(
-            CodecId::H264,
-            VideoParams {
-                pix_fmt: PixelFormat::Yuv420p,
-                width: parsed.width,
-                height: parsed.height,
-                frame_rate: Rational::new(25, 1),
-                sample_aspect_ratio: Rational::one(),
-            },
-        );
-        params.extradata = parsed.avcc;
-        let mut stream = Stream::new(0, params);
-        stream.time_base = Rational::new(1, parsed.timescale.max(1) as i32);
-        stream.nb_frames = Some(parsed.samples.len() as u64);
         Ok(Self {
-            streams: vec![stream],
+            streams: parsed.streams,
             samples: parsed.samples,
             index: 0,
-            length_size: parsed.length_size,
         })
     }
 }
@@ -80,10 +65,8 @@ impl Demuxer for Mp4Demuxer {
         reader.seek(SeekFrom::Start(sample.offset))?;
         let mut buf = vec![0u8; sample.size as usize];
         reader.read_exact(&mut buf)?;
-        // Keep AVCC; decoder uses extradata avcC.
-        let _ = self.length_size;
         let mut pkt = Packet::new(Buffer::from_vec(buf));
-        pkt.stream_index = 0;
+        pkt.stream_index = sample.stream_index;
         pkt.pts = Timestamp::new(sample.cts);
         pkt.dts = pkt.pts;
         if sample.is_key {
@@ -104,11 +87,30 @@ impl Demuxer for Mp4Demuxer {
 }
 
 struct ParsedMp4 {
-    width: u32,
-    height: u32,
+    streams: Vec<Stream>,
+    samples: Vec<SampleEntry>,
+}
+
+#[derive(Clone, Debug)]
+enum TrackKind {
+    Video {
+        width: u32,
+        height: u32,
+        avcc: Vec<u8>,
+        #[allow(dead_code)]
+        length_size: usize,
+    },
+    Audio {
+        sample_rate: u32,
+        channels: u16,
+        extradata: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct TrackInfo {
+    kind: TrackKind,
     timescale: u32,
-    avcc: Vec<u8>,
-    length_size: usize,
     samples: Vec<SampleEntry>,
 }
 
@@ -144,7 +146,7 @@ fn parse_mp4(data: &[u8]) -> Result<ParsedMp4> {
 
 fn parse_moov(moov: &[u8], file: &[u8]) -> Result<ParsedMp4> {
     let mut timescale = 1000u32;
-    let mut track = None;
+    let mut tracks = Vec::new();
     let mut i = 0;
     while i + 8 <= moov.len() {
         let size = u32::from_be_bytes(moov[i..i + 4].try_into().unwrap()) as usize;
@@ -157,24 +159,113 @@ fn parse_moov(moov: &[u8], file: &[u8]) -> Result<ParsedMp4> {
             timescale = parse_mvhd_timescale(payload)?;
         } else if typ == b"trak" {
             if let Ok(t) = parse_trak(payload, file) {
-                track = Some(t);
+                tracks.push(t);
             }
         }
         i += size;
     }
-    let track = track.ok_or_else(|| Error::not_found("no H.264 video track in MP4"))?;
-    Ok(ParsedMp4 {
-        width: track.width,
-        height: track.height,
-        timescale: if track.timescale != 0 {
-            track.timescale
+    if tracks.is_empty() {
+        return Err(Error::not_found("no supported tracks in MP4"));
+    }
+
+    let mut streams = Vec::new();
+    let mut samples = Vec::new();
+    for track in tracks {
+        let stream_index = streams.len();
+        let tb = Rational::new(
+            1,
+            if track.timescale != 0 {
+                track.timescale
+            } else {
+                timescale
+            }
+            .max(1) as i32,
+        );
+        let stream = track_to_stream(stream_index, &track, tb);
+        streams.push(stream);
+        for mut sample in track.samples {
+            sample.stream_index = stream_index;
+            samples.push(sample);
+        }
+    }
+    samples.sort_by_key(|s| s.offset);
+    Ok(ParsedMp4 { streams, samples })
+}
+
+fn track_to_stream(index: usize, track: &TrackInfo, time_base: Rational) -> Stream {
+    let mut stream = match &track.kind {
+        TrackKind::Video {
+            width,
+            height,
+            avcc,
+            ..
+        } => {
+            let frame_rate = estimate_frame_rate(track);
+            let mut params = CodecParams::video_codec(
+                CodecId::H264,
+                VideoParams {
+                    pix_fmt: PixelFormat::Yuv420p,
+                    width: *width,
+                    height: *height,
+                    frame_rate,
+                    sample_aspect_ratio: Rational::one(),
+                },
+            );
+            params.extradata = avcc.clone();
+            Stream::new(index, params)
+        }
+        TrackKind::Audio {
+            sample_rate,
+            channels,
+            extradata,
+        } => {
+            let mut params = CodecParams::audio_codec(
+                CodecId::Aac,
+                AudioParams {
+                    sample_fmt: SampleFormat::S16,
+                    sample_rate: *sample_rate,
+                    layout: ChannelLayout::new(*channels),
+                    frame_size: 0,
+                },
+            );
+            params.extradata = extradata.clone();
+            Stream::new(index, params)
+        }
+    };
+    stream.time_base = time_base;
+    stream.nb_frames = Some(track.samples.len() as u64);
+    if !track.samples.is_empty() {
+        // Media duration ≈ last sample CTS + one average delta.
+        let first = track.samples.first().unwrap().cts;
+        let last = track.samples.last().unwrap().cts;
+        let n = track.samples.len() as i64;
+        let avg_delta = if n > 1 {
+            ((last - first) / (n - 1)).max(1)
         } else {
-            timescale
-        },
-        avcc: track.avcc,
-        length_size: track.length_size,
-        samples: track.samples,
-    })
+            1
+        };
+        stream.duration = Some(last + avg_delta);
+    }
+    stream
+}
+
+/// Estimate fps from media timescale and average sample duration (from CTS spacing).
+fn estimate_frame_rate(track: &TrackInfo) -> Rational {
+    if track.timescale == 0 || track.samples.len() < 2 {
+        return Rational::new(25, 1);
+    }
+    let last = track.samples.last().unwrap().cts;
+    let first = track.samples.first().unwrap().cts;
+    let span = (last - first).max(1) as u64;
+    let n = (track.samples.len() - 1) as u64;
+    // fps ≈ n * timescale / span
+    let num = (n * u64::from(track.timescale)) as i32;
+    let den = span as i32;
+    if den <= 0 || num <= 0 {
+        Rational::new(25, 1)
+    } else {
+        Rational::new(num, den).reduce()
+    }
 }
 
 fn parse_mvhd_timescale(payload: &[u8]) -> Result<u32> {
@@ -193,15 +284,6 @@ fn parse_mvhd_timescale(payload: &[u8]) -> Result<u32> {
         }
         Ok(u32::from_be_bytes(payload[12..16].try_into().unwrap()))
     }
-}
-
-struct TrackInfo {
-    width: u32,
-    height: u32,
-    timescale: u32,
-    avcc: Vec<u8>,
-    length_size: usize,
-    samples: Vec<SampleEntry>,
 }
 
 fn parse_trak(trak: &[u8], file: &[u8]) -> Result<TrackInfo> {
@@ -243,9 +325,10 @@ fn parse_mdia(mdia: &[u8], file: &[u8]) -> Result<TrackInfo> {
         i += size;
     }
     let hdlr = hdlr.ok_or_else(|| Error::invalid_data("missing hdlr"))?;
-    if hdlr.len() < 12 || &hdlr[8..12] != b"vide" {
-        return Err(Error::invalid_data("not a video track"));
+    if hdlr.len() < 12 {
+        return Err(Error::invalid_data("hdlr too short"));
     }
+    let handler = &hdlr[8..12];
     let minf = minf.ok_or_else(|| Error::invalid_data("missing minf"))?;
     let mut stbl = None;
     let mut j = 0;
@@ -261,7 +344,16 @@ fn parse_mdia(mdia: &[u8], file: &[u8]) -> Result<TrackInfo> {
         j += size;
     }
     let stbl = stbl.ok_or_else(|| Error::invalid_data("missing stbl"))?;
-    parse_stbl(stbl, file, timescale)
+    if handler == b"vide" {
+        parse_stbl_video(stbl, file, timescale)
+    } else if handler == b"soun" {
+        parse_stbl_audio(stbl, file, timescale)
+    } else {
+        Err(Error::unsupported(format!(
+            "MP4 track handler {}",
+            String::from_utf8_lossy(handler)
+        )))
+    }
 }
 
 fn parse_mdhd_timescale(payload: &[u8]) -> Result<u32> {
@@ -281,7 +373,7 @@ fn parse_mdhd_timescale(payload: &[u8]) -> Result<u32> {
     }
 }
 
-fn parse_stbl(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInfo> {
+fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInfo> {
     let mut stsd = None;
     let mut stts = None;
     let mut stsc = None;
@@ -337,6 +429,7 @@ fn parse_stbl(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInfo> {
             .map(|k| k.contains(&(idx as u32 + 1)))
             .unwrap_or(idx == 0);
         samples.push(SampleEntry {
+            stream_index: 0,
             offset,
             size,
             cts,
@@ -351,15 +444,159 @@ fn parse_stbl(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInfo> {
             return Err(Error::invalid_data("sample extends past EOF"));
         }
     }
-    let _ = timescale;
     Ok(TrackInfo {
-        width,
-        height,
+        kind: TrackKind::Video {
+            width,
+            height,
+            avcc,
+            length_size,
+        },
         timescale,
-        avcc,
-        length_size,
         samples,
     })
+}
+
+fn parse_stbl_audio(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInfo> {
+    let mut stsd = None;
+    let mut stts = None;
+    let mut stsc = None;
+    let mut stsz = None;
+    let mut stco = None;
+    let mut co64 = None;
+    let mut i = 0;
+    while i + 8 <= stbl.len() {
+        let size = u32::from_be_bytes(stbl[i..i + 4].try_into().unwrap()) as usize;
+        let typ = &stbl[i + 4..i + 8];
+        if size < 8 || i + size > stbl.len() {
+            break;
+        }
+        let payload = &stbl[i + 8..i + size];
+        match typ {
+            b"stsd" => stsd = Some(payload),
+            b"stts" => stts = Some(payload),
+            b"stsc" => stsc = Some(payload),
+            b"stsz" | b"stz2" => stsz = Some(payload),
+            b"stco" => stco = Some(payload),
+            b"co64" => co64 = Some(payload),
+            _ => {}
+        }
+        i += size;
+    }
+    let stsd = stsd.ok_or_else(|| Error::invalid_data("missing stsd"))?;
+    let (sample_rate, channels, extradata) = parse_stsd_mp4a(stsd)?;
+    let sizes = parse_stsz(stsz.ok_or_else(|| Error::invalid_data("missing stsz"))?)?;
+    let chunk_offsets = if let Some(stco) = stco {
+        parse_stco(stco)?
+    } else if let Some(co64) = co64 {
+        parse_co64(co64)?
+    } else {
+        return Err(Error::invalid_data("missing stco/co64"));
+    };
+    let stsc = parse_stsc(stsc.ok_or_else(|| Error::invalid_data("missing stsc"))?)?;
+    let stts = parse_stts(stts.ok_or_else(|| Error::invalid_data("missing stts"))?)?;
+
+    let sample_offsets = expand_sample_offsets(&chunk_offsets, &stsc, &sizes)?;
+    if sample_offsets.len() != sizes.len() {
+        return Err(Error::invalid_data("sample table size mismatch"));
+    }
+    let mut cts = 0i64;
+    let mut samples = Vec::with_capacity(sizes.len());
+    let mut stts_iter = expand_stts(&stts);
+    for (idx, (&offset, &size)) in sample_offsets.iter().zip(sizes.iter()).enumerate() {
+        let dur = stts_iter.next().unwrap_or(1);
+        samples.push(SampleEntry {
+            stream_index: 0,
+            offset,
+            size,
+            cts,
+            is_key: idx == 0,
+        });
+        cts += i64::from(dur);
+    }
+    for s in &samples {
+        let end = s.offset as usize + s.size as usize;
+        if end > file.len() {
+            return Err(Error::invalid_data("sample extends past EOF"));
+        }
+    }
+    Ok(TrackInfo {
+        kind: TrackKind::Audio {
+            sample_rate,
+            channels,
+            extradata,
+        },
+        timescale,
+        samples,
+    })
+}
+
+fn parse_stsd_mp4a(stsd: &[u8]) -> Result<(u32, u16, Vec<u8>)> {
+    if stsd.len() < 8 {
+        return Err(Error::invalid_data("stsd"));
+    }
+    let entry_count = u32::from_be_bytes(stsd[4..8].try_into().unwrap());
+    if entry_count == 0 {
+        return Err(Error::invalid_data("empty stsd"));
+    }
+    let i = 8;
+    let size = u32::from_be_bytes(stsd[i..i + 4].try_into().unwrap()) as usize;
+    let typ = &stsd[i + 4..i + 8];
+    if typ != b"mp4a" {
+        return Err(Error::unsupported(format!(
+            "audio sample entry {} (only mp4a)",
+            String::from_utf8_lossy(typ)
+        )));
+    }
+    if size < 36 || i + size > stsd.len() {
+        return Err(Error::invalid_data("bad mp4a size"));
+    }
+    let entry = &stsd[i..i + size];
+    let channels = u16::from_be_bytes(entry[16..18].try_into().unwrap());
+    let sample_rate = u32::from_be_bytes([entry[24], entry[25], entry[26], entry[27]]);
+
+    let mut j = 36;
+    while j + 8 <= entry.len() {
+        let bsize = u32::from_be_bytes(entry[j..j + 4].try_into().unwrap()) as usize;
+        let btyp = &entry[j + 4..j + 8];
+        if bsize < 8 || j + bsize > entry.len() {
+            break;
+        }
+        if btyp == b"esds" {
+            let esds = &entry[j + 8..j + bsize];
+            let asc = parse_esds_audio_specific_config(esds)?;
+            return Ok((sample_rate, channels.max(1), asc));
+        }
+        j += bsize;
+    }
+    Ok((sample_rate, channels.max(1), Vec::new()))
+}
+
+fn parse_esds_audio_specific_config(esds: &[u8]) -> Result<Vec<u8>> {
+    let mut i = 0usize;
+    while i + 2 < esds.len() {
+        let tag = esds[i];
+        i += 1;
+        let mut len = 0usize;
+        loop {
+            if i >= esds.len() {
+                return Err(Error::invalid_data("truncated esds"));
+            }
+            let b = esds[i];
+            i += 1;
+            len = (len << 7) | (b & 0x7F) as usize;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        if i + len > esds.len() {
+            return Err(Error::invalid_data("bad esds length"));
+        }
+        if tag == 0x05 {
+            return Ok(esds[i..i + len].to_vec());
+        }
+        i += len;
+    }
+    Err(Error::invalid_data("esds missing ASC"))
 }
 
 fn parse_stsd_avc1(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize)> {
@@ -518,7 +755,7 @@ fn parse_stss(payload: Option<&[u8]>) -> Option<Vec<u32>> {
 
 fn expand_stts(stts: &[(u32, u32)]) -> impl Iterator<Item = u32> + '_ {
     stts.iter()
-        .flat_map(|&(count, delta)| std::iter::repeat(delta).take(count as usize))
+        .flat_map(|&(count, delta)| std::iter::repeat_n(delta, count as usize))
 }
 
 fn expand_sample_offsets(
@@ -559,7 +796,10 @@ pub struct Mp4Muxer {
     width: u16,
     height: u16,
     samples: Vec<Vec<u8>>,
+    sample_is_key: Vec<bool>,
     timescale: u32,
+    /// Duration of each sample in `timescale` ticks.
+    sample_delta: u32,
 }
 
 impl Mp4Muxer {
@@ -571,7 +811,9 @@ impl Mp4Muxer {
             width: 0,
             height: 0,
             samples: Vec::new(),
+            sample_is_key: Vec::new(),
             timescale: 1000,
+            sample_delta: 40, // 25 fps default at 1000 Hz
         }
     }
 }
@@ -607,6 +849,20 @@ impl Muxer for Mp4Muxer {
                 "H.264 MP4 mux requires avcC extradata on the stream",
             ));
         }
+        // Derive timescale + sample delta from frame_rate.
+        let fps = video.frame_rate.as_f64();
+        if fps > 0.0 && video.frame_rate.num > 0 && video.frame_rate.den > 0 {
+            // Prefer exact integer: timescale = fps.num, delta = fps.den when fps = num/den.
+            // Use a comfortable timescale (≥ fps) so delta ≥ 1.
+            let num = video.frame_rate.num.unsigned_abs().max(1);
+            let den = video.frame_rate.den.unsigned_abs().max(1);
+            // timescale ticks/sec such that delta = timescale * den / num is integer.
+            self.timescale = num;
+            self.sample_delta = den;
+            if self.sample_delta == 0 {
+                self.sample_delta = 1;
+            }
+        }
         self.streams.push(Stream::new(0, params));
         Ok(0)
     }
@@ -620,7 +876,7 @@ impl Muxer for Mp4Muxer {
     }
 
     fn write_packet(&mut self, _writer: &mut dyn IoWriter, packet: &Packet) -> Result<()> {
-        // Convert Annex-B â†’ AVCC if needed.
+        // Convert Annex-B → AVCC if needed.
         let data = if packet.data.windows(4).any(|w| w == [0, 0, 0, 1])
             || packet.data.windows(3).any(|w| w == [0, 0, 1])
         {
@@ -628,9 +884,10 @@ impl Muxer for Mp4Muxer {
         } else {
             packet.data.as_slice().to_vec()
         };
-        // Strip SPS/PPS NAL types from AVCC sample if present (keep VCL only).
         let filtered = filter_avcc_vcl(&data)?;
         self.samples.push(filtered);
+        self.sample_is_key
+            .push(packet.flags.contains(PacketFlags::KEY));
         Ok(())
     }
 
@@ -643,7 +900,9 @@ impl Muxer for Mp4Muxer {
             self.height,
             &self.extradata,
             &self.samples,
+            &self.sample_is_key,
             self.timescale,
+            self.sample_delta,
         )?;
         writer.write_all(&bytes)?;
         writer.flush()?;
@@ -681,7 +940,9 @@ fn build_mp4(
     height: u16,
     avcc: &[u8],
     samples: &[Vec<u8>],
+    sample_is_key: &[bool],
     timescale: u32,
+    sample_delta: u32,
 ) -> Result<Vec<u8>> {
     let mut mdat_payload = Vec::new();
     let mut sample_sizes = Vec::new();
@@ -710,8 +971,10 @@ fn build_mp4(
         height,
         avcc,
         &sample_sizes,
+        sample_is_key,
         data_offset,
         timescale,
+        sample_delta,
         samples.len() as u32,
     )?;
 
@@ -724,16 +987,20 @@ fn build_mp4(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_moov(
     width: u16,
     height: u16,
     avcc: &[u8],
     sample_sizes: &[u32],
+    sample_is_key: &[bool],
     chunk_offset: u32,
     timescale: u32,
+    sample_delta: u32,
     sample_count: u32,
 ) -> Result<Vec<u8>> {
-    let duration = sample_count.saturating_mul(40); // 25 fps â†’ 40ms in 1000Hz
+    let delta = sample_delta.max(1);
+    let duration = sample_count.saturating_mul(delta);
     let mvhd = box_of(b"mvhd", {
         let mut b = vec![0u8; 100];
         b[0] = 0; // version
@@ -812,7 +1079,7 @@ fn build_moov(
         b.extend_from_slice(&0u32.to_be_bytes());
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&sample_count.to_be_bytes());
-        b.extend_from_slice(&40u32.to_be_bytes());
+        b.extend_from_slice(&delta.to_be_bytes());
         b
     });
     let stsc = box_of(b"stsc", {
@@ -841,11 +1108,22 @@ fn build_moov(
         b.extend_from_slice(&chunk_offset.to_be_bytes());
         b
     });
+    // Sync samples: all KEY frames (1-based indices). Ensure at least sample 1.
+    let mut key_indices: Vec<u32> = sample_is_key
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| if *k { Some((i + 1) as u32) } else { None })
+        .collect();
+    if key_indices.is_empty() {
+        key_indices.push(1);
+    }
     let stss = box_of(b"stss", {
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
-        b.extend_from_slice(&1u32.to_be_bytes());
-        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&(key_indices.len() as u32).to_be_bytes());
+        for idx in &key_indices {
+            b.extend_from_slice(&idx.to_be_bytes());
+        }
         b
     });
     let stbl = box_of(
@@ -874,11 +1152,11 @@ fn build_moov(
 
 fn build_avc1(width: u16, height: u16, avcc: &[u8]) -> Result<Vec<u8>> {
     let mut body = vec![0u8; 78];
-    // after size+type added by box_of â€” VisualSampleEntry fields start at 0 of body:
+    // after size+type added by box_of -- VisualSampleEntry fields start at 0 of body:
     // reserved 6, data_ref 2, predef/reserved 16, width/height at 24/26 of body...
     // SampleEntry: 6 bytes reserved + 2 data_reference_index
     body[6..8].copy_from_slice(&1u16.to_be_bytes());
-    // VisualSampleEntry continues: pre_defined(2)+reserved(2)+pre_defined[3](12) = 16 â†’ width at 24
+    // VisualSampleEntry continues: pre_defined(2)+reserved(2)+pre_defined[3](12) = 16 -> width at 24
     body[24..26].copy_from_slice(&width.to_be_bytes());
     body[26..28].copy_from_slice(&height.to_be_bytes());
     body[28..32].copy_from_slice(&0x00480000u32.to_be_bytes()); // horiz resolution 72 dpi

@@ -17,3 +17,10 @@ rumpeg-scale = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+claxon = { workspace = true }
+flacenc = { workspace = true }
+rusty_mp3 = { workspace = true }
+rusty_aac = { workspace = true }
+rusty-opus = { workspace = true }
+rusty_h265 = { workspace = true }
+rusty_vp9 = { workspace = true }

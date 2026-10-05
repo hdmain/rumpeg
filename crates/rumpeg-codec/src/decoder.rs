@@ -1,8 +1,16 @@
 //! Decoder trait and context.
 
+use crate::aac::AacDecoderCodec;
+use crate::flac::FlacDecoder;
 use crate::h264::H264Decoder;
+use crate::hevc::HevcDecoder;
+use crate::jpeg_dec::JpegDecoderCodec;
+use crate::mp3::Mp3DecoderCodec;
+use crate::opus::OpusDecoderCodec;
 use crate::pcm::PcmDecoder;
+use crate::png_dec::PngDecoderCodec;
 use crate::rawvideo::RawVideoDecoder;
+use crate::vp9::Vp9DecoderCodec;
 use rumpeg_util::{CodecId, CodecParams, Error, Frame, Packet, Result};
 
 /// Trait implemented by all decoders.
@@ -39,6 +47,14 @@ impl DecoderContext {
             | CodecId::PcmU8 => Box::new(PcmDecoder::new(params)?),
             CodecId::RawVideo => Box::new(RawVideoDecoder::new(params)?),
             CodecId::H264 => Box::new(H264Decoder::new(params)?),
+            CodecId::Hevc => Box::new(HevcDecoder::new(params)?),
+            CodecId::Vp9 => Box::new(Vp9DecoderCodec::new(params)?),
+            CodecId::Flac => Box::new(FlacDecoder::new(params)?),
+            CodecId::Mp3 => Box::new(Mp3DecoderCodec::new(params)?),
+            CodecId::Aac => Box::new(AacDecoderCodec::new(params)?),
+            CodecId::Opus => Box::new(OpusDecoderCodec::new(params)?),
+            CodecId::Mjpeg => Box::new(JpegDecoderCodec::new(params)?),
+            CodecId::Png => Box::new(PngDecoderCodec::new(params)?),
             other => return Err(Error::not_found(format!("decoder for {other}"))),
         };
         Ok(Self {

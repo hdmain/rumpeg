@@ -6,3 +6,6 @@
 *.wav
 !testdata/*.wav
 .DS_Store
+*.jpg
+*.png
+*.mp4

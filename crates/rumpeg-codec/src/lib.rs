@@ -1,22 +1,32 @@
 //! Codec framework — Rumpeg's `libavcodec` counterpart.
 //!
 //! Provides decoder/encoder traits, a codec registry, and built-in PCM /
-//! rawvideo / H.264 / JPEG codecs. The send/receive API mirrors FFmpeg's
-//! `avcodec_send_packet` / `avcodec_receive_frame` model.
+//! rawvideo / H.264 / HEVC / VP9 / FLAC / Opus / AAC / MP3 / JPEG / PNG codecs.
+//! The send/receive API mirrors FFmpeg's `avcodec_send_packet` /
+//! `avcodec_receive_frame` model.
 //!
-//! H.264 is provided by the pure-Rust [`rumpeg_h264`] crate (Baseline `I_PCM`),
-//! not Cisco OpenH264 FFI.
+//! All codecs registered here are pure-Rust (no C FFI). AV1 and VP8 are not
+//! registered until a working decode path exists.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+pub mod aac;
 pub mod decoder;
 pub mod encoder;
+pub mod flac;
 pub mod h264;
+pub mod hevc;
 pub mod jpeg;
+pub mod jpeg_dec;
+pub mod mp3;
+pub mod opus;
 pub mod pcm;
+pub mod png;
+pub mod png_dec;
 pub mod rawvideo;
 pub mod registry;
+pub mod vp9;
 
 pub use decoder::{Decoder, DecoderContext};
 pub use encoder::{Encoder, EncoderContext};

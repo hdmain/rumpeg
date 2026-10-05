@@ -1,8 +1,13 @@
 //! Encoder trait and context.
 
+use crate::aac::AacEncoderCodec;
+use crate::flac::FlacEncoder;
 use crate::h264::H264Encoder;
 use crate::jpeg::JpegEncoderCodec;
+use crate::mp3::Mp3EncoderCodec;
+use crate::opus::OpusEncoderCodec;
 use crate::pcm::PcmEncoder;
+use crate::png::PngEncoderCodec;
 use crate::rawvideo::RawVideoEncoder;
 use rumpeg_util::{CodecId, CodecParams, Error, Frame, Packet, Result};
 
@@ -41,6 +46,11 @@ impl EncoderContext {
             CodecId::RawVideo => Box::new(RawVideoEncoder::new(params)?),
             CodecId::H264 => Box::new(H264Encoder::new(params)?),
             CodecId::Mjpeg => Box::new(JpegEncoderCodec::new(params)?),
+            CodecId::Png => Box::new(PngEncoderCodec::new(params)?),
+            CodecId::Flac => Box::new(FlacEncoder::new(params)?),
+            CodecId::Mp3 => Box::new(Mp3EncoderCodec::new(params)?),
+            CodecId::Aac => Box::new(AacEncoderCodec::new(params)?),
+            CodecId::Opus => Box::new(OpusEncoderCodec::new(params)?),
             other => return Err(Error::not_found(format!("encoder for {other}"))),
         };
         Ok(Self {

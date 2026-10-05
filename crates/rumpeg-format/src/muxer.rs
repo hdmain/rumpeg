@@ -5,7 +5,7 @@ use crate::io::{IoWriter, MediaIo};
 use crate::mp4::Mp4Muxer;
 use crate::stream::Stream;
 use crate::wav::WavMuxer;
-use rumpeg_util::{CodecParams, Error, Packet, Result};
+use rumpeg_util::{CodecId, CodecParams, Error, Packet, Result};
 use std::path::Path;
 
 /// Trait implemented by container muxers.
@@ -58,7 +58,8 @@ impl OutputContext {
         let muxer: Box<dyn Muxer> = match format_name {
             "wav" => Box::new(WavMuxer::new()),
             "mp4" | "m4v" | "mov" => Box::new(Mp4Muxer::new()),
-            "jpg" | "jpeg" | "image2" => Box::new(Image2Muxer::new()),
+            "jpg" | "jpeg" | "image2" => Box::new(Image2Muxer::with_codec(CodecId::Mjpeg)),
+            "png" => Box::new(Image2Muxer::with_codec(CodecId::Png)),
             other => {
                 return Err(Error::unsupported(format!("no muxer for format '{other}'")));
             }

@@ -1,7 +1,8 @@
 //! H.264 decoder/encoder wrappers around the pure-Rust [`rumpeg_h264`] crate.
 //!
-//! **No Cisco OpenH264 C/C++ FFI** — decoding/encoding uses Rumpeg's own
-//! Baseline `I_PCM` implementation.
+//! **No Cisco OpenH264 C/C++ FFI** — decoding uses [`rusty_h264_decoder`]
+//! (CAVLC + CABAC) via `rumpeg-h264`; encoding uses Rumpeg’s Baseline
+//! `I_PCM` / `I_16x16` CAVLC encoder with optional P (SKIP / Intra-refresh).
 
 use crate::decoder::Decoder;
 use crate::encoder::Encoder;
@@ -11,19 +12,18 @@ use rumpeg_util::{
 };
 use std::collections::VecDeque;
 
+pub use rumpeg_h264::IntraMode;
+
 fn video_params(params: &CodecParams) -> Result<VideoParams> {
     match &params.specific {
         CodecSpecific::Video(v) => Ok(v.clone()),
-        _ => {
-            // Dimensions may be unknown until SPS; allow zeros.
-            Ok(VideoParams {
-                pix_fmt: PixelFormat::Yuv420p,
-                width: 0,
-                height: 0,
-                frame_rate: Default::default(),
-                sample_aspect_ratio: Default::default(),
-            })
-        }
+        _ => Ok(VideoParams {
+            pix_fmt: PixelFormat::Yuv420p,
+            width: 0,
+            height: 0,
+            frame_rate: Default::default(),
+            sample_aspect_ratio: Default::default(),
+        }),
     }
 }
 
@@ -64,7 +64,21 @@ fn video_frame_to_yuv(frame: &VideoFrame) -> Result<rumpeg_h264::Yuv420Planar> {
     })
 }
 
-/// Pure-Rust H.264 decoder (`I_PCM` IDR subset).
+fn fps_from_params(params: &CodecParams) -> f64 {
+    params
+        .video()
+        .map(|v| {
+            let r = v.frame_rate.as_f64();
+            if r > 0.0 {
+                r
+            } else {
+                25.0
+            }
+        })
+        .unwrap_or(25.0)
+}
+
+/// Pure-Rust H.264 decoder (CABAC + CAVLC via `rusty_h264-decoder`).
 pub struct H264Decoder {
     inner: rumpeg_h264::Decoder,
     pending: VecDeque<Frame>,
@@ -136,18 +150,23 @@ impl Decoder for H264Decoder {
     }
 }
 
-/// Pure-Rust H.264 encoder (`I_PCM` IDR).
+/// Pure-Rust H.264 encoder. Defaults to `I_16x16` CAVLC + P when dimensions known;
+/// use [`IntraMode::Ipcm`] for lossless-ish Intra.
 pub struct H264Encoder {
     inner: rumpeg_h264::Encoder,
     pending: VecDeque<Packet>,
     eof: bool,
-    /// Emit Annex-B access units including SPS/PPS each frame (simple for .h264).
-    annexb_with_params: bool,
 }
 
 impl H264Encoder {
-    /// Open encoder; requires known video width/height.
+    /// Open encoder; prefers CAVLC + Inter for practical re-encode size.
     pub fn new(params: &CodecParams) -> Result<Self> {
+        // Default to CAVLC (lossy) for file-size usefulness; I_PCM only when requested.
+        Self::with_mode(params, IntraMode::I16x16Cavlc)
+    }
+
+    /// Open encoder with an explicit Intra mode.
+    pub fn with_mode(params: &CodecParams, mode: IntraMode) -> Result<Self> {
         let video = match &params.specific {
             CodecSpecific::Video(v) if v.width > 0 && v.height > 0 => v.clone(),
             _ => {
@@ -156,13 +175,41 @@ impl H264Encoder {
                 ));
             }
         };
-        let inner = rumpeg_h264::Encoder::new(video.width, video.height).map_err(map_h264)?;
+        let mut inner =
+            rumpeg_h264::Encoder::with_mode(video.width, video.height, mode).map_err(map_h264)?;
+        if params.quality >= 0 {
+            inner.set_qp(params.quality);
+        } else if params.bit_rate > 0 {
+            inner.set_bitrate(params.bit_rate, fps_from_params(params));
+        }
+        if params.gop_size > 0 {
+            inner.set_gop_size(params.gop_size);
+        }
         Ok(Self {
             inner,
             pending: VecDeque::new(),
             eof: false,
-            annexb_with_params: true,
         })
+    }
+
+    /// Set QP (0..=51).
+    pub fn set_qp(&mut self, qp: i32) {
+        self.inner.set_qp(qp);
+    }
+
+    /// Set CRF-like quality (mapped to QP).
+    pub fn set_crf(&mut self, crf: f32) {
+        self.inner.set_crf(crf);
+    }
+
+    /// Set target bitrate (bits/s) given fps for QP approximation.
+    pub fn set_bitrate(&mut self, bit_rate: u64, fps: f64) {
+        self.inner.set_bitrate(bit_rate, fps);
+    }
+
+    /// Set GOP size (IDR interval).
+    pub fn set_gop_size(&mut self, gop: u32) {
+        self.inner.set_gop_size(gop);
     }
 
     /// `avcC` extradata for MP4 muxing.
@@ -185,21 +232,13 @@ impl Encoder for H264Encoder {
             return Err(Error::invalid_data("H.264 encoder expects video"));
         };
         let yuv = video_frame_to_yuv(video)?;
-        let bytes = if self.annexb_with_params {
-            self.inner.encode_annexb(&yuv).map_err(map_h264)?
-        } else {
-            let nal = self.inner.encode_idr_nal(&yuv).map_err(map_h264)?;
-            rumpeg_h264::annexb_to_avcc_sample(&{
-                let mut a = Vec::new();
-                a.extend_from_slice(&[0, 0, 0, 1]);
-                a.extend_from_slice(&nal);
-                a
-            })
-        };
+        let (bytes, is_key) = self.inner.encode_access_unit(&yuv).map_err(map_h264)?;
         let mut pkt = Packet::new(Buffer::from_vec(bytes));
         pkt.pts = video.pts;
         pkt.dts = video.pts;
-        pkt.flags.insert(PacketFlags::KEY);
+        if is_key {
+            pkt.flags.insert(PacketFlags::KEY);
+        }
         self.pending.push_back(pkt);
         Ok(())
     }

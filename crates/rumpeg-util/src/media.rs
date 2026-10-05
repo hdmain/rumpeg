@@ -70,6 +70,8 @@ pub enum CodecId {
     Vp8,
     /// MJPEG.
     Mjpeg,
+    /// PNG still image.
+    Png,
 }
 
 impl CodecId {
@@ -92,7 +94,8 @@ impl CodecId {
             | Self::Av1
             | Self::Vp9
             | Self::Vp8
-            | Self::Mjpeg => MediaType::Video,
+            | Self::Mjpeg
+            | Self::Png => MediaType::Video,
         }
     }
 
@@ -116,6 +119,7 @@ impl CodecId {
             Self::Vp9 => "vp9",
             Self::Vp8 => "vp8",
             Self::Mjpeg => "mjpeg",
+            Self::Png => "png",
         }
     }
 
@@ -138,6 +142,7 @@ impl CodecId {
             "vp9" => Self::Vp9,
             "vp8" => Self::Vp8,
             "mjpeg" => Self::Mjpeg,
+            "png" => Self::Png,
             _ => return None,
         })
     }
@@ -401,6 +406,10 @@ pub struct CodecParams {
     pub extradata: Vec<u8>,
     /// Bit rate hint in bits/second (0 = unknown).
     pub bit_rate: u64,
+    /// Encoder quality / QP / CRF hint (`-1` = unset). For H.264 this maps to QP.
+    pub quality: i32,
+    /// GOP / IDR interval hint (`0` = codec default).
+    pub gop_size: u32,
     /// Type-specific parameters.
     pub specific: CodecSpecific,
 }
@@ -422,6 +431,8 @@ impl Default for CodecParams {
             codec_id: CodecId::None,
             extradata: Vec::new(),
             bit_rate: 0,
+            quality: -1,
+            gop_size: 0,
             specific: CodecSpecific::None,
         }
     }
@@ -453,12 +464,22 @@ impl CodecParams {
         }
     }
 
+    /// Mutably borrow video params if present.
+    pub fn video_mut(&mut self) -> Option<&mut VideoParams> {
+        match &mut self.specific {
+            CodecSpecific::Video(v) => Some(v),
+            _ => None,
+        }
+    }
+
     /// Construct audio codec params.
     pub fn audio_codec(codec_id: CodecId, audio: AudioParams) -> Self {
         Self {
             codec_id,
             extradata: Vec::new(),
             bit_rate: 0,
+            quality: -1,
+            gop_size: 0,
             specific: CodecSpecific::Audio(audio),
         }
     }
@@ -469,6 +490,8 @@ impl CodecParams {
             codec_id,
             extradata: Vec::new(),
             bit_rate: 0,
+            quality: -1,
+            gop_size: 0,
             specific: CodecSpecific::Video(video),
         }
     }
