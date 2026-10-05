@@ -97,9 +97,16 @@ impl Registry {
             CodecDescriptor {
                 id: CodecId::H264,
                 name: "h264",
-                long_name: "H.264 / AVC",
+                long_name: "H.264 / AVC (pure-Rust I_PCM Baseline)",
                 media_type: MediaType::Video,
-                kind: CodecKind::Decoder,
+                kind: CodecKind::Both,
+            },
+            CodecDescriptor {
+                id: CodecId::Mjpeg,
+                name: "mjpeg",
+                long_name: "Motion JPEG / JPEG image",
+                media_type: MediaType::Video,
+                kind: CodecKind::Encoder,
             },
             CodecDescriptor {
                 id: CodecId::Av1,

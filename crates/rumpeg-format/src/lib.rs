@@ -1,14 +1,13 @@
 //! Container format layer — Rumpeg's `libavformat` counterpart.
-//!
-//! Demuxers produce [`Packet`]s from containers; muxers write packets into
-//! containers. I/O is abstracted so the same demuxer can read from files,
-//! memory, or custom sources.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
 pub mod demuxer;
+pub mod h264raw;
+pub mod image2;
 pub mod io;
+pub mod mp4;
 pub mod muxer;
 pub mod probe;
 pub mod stream;

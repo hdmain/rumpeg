@@ -13,6 +13,7 @@ readme = "../../README.md"
 
 [dependencies]
 rumpeg-util = { workspace = true }
+rumpeg-h264 = { workspace = true }
 rumpeg-codec = { workspace = true }
 rumpeg-format = { workspace = true }
 rumpeg-scale = { workspace = true }
@@ -26,3 +27,7 @@ path = "../../examples/decode_wav.rs"
 [[example]]
 name = "generate_wav"
 path = "../../examples/generate_wav.rs"
+
+[[example]]
+name = "extract_thumb"
+path = "../../examples/extract_thumb.rs"

@@ -1,6 +1,8 @@
 //! Format probing — identify containers from a small header peek.
 
+use crate::h264raw;
 use crate::io::IoReader;
+use crate::mp4;
 use crate::wav;
 use rumpeg_util::{Error, Result};
 use std::io::SeekFrom;
@@ -29,7 +31,11 @@ pub fn probe(reader: &mut dyn IoReader) -> Result<ProbeResult> {
     let _ = reader.seek(SeekFrom::Start(start));
 
     let mut best: Option<ProbeResult> = None;
-    let candidates = [("wav", wav::probe_score(&buf))];
+    let candidates = [
+        ("mp4", mp4::probe_score(&buf)),
+        ("wav", wav::probe_score(&buf)),
+        ("h264", h264raw::probe_score(&buf)),
+    ];
     for (name, score) in candidates {
         if score == 0 {
             continue;

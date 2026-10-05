@@ -1,8 +1,8 @@
 //! Decoder trait and context.
 
+use crate::h264::H264Decoder;
 use crate::pcm::PcmDecoder;
 use crate::rawvideo::RawVideoDecoder;
-use crate::registry::global;
 use rumpeg_util::{CodecId, CodecParams, Error, Frame, Packet, Result};
 
 /// Trait implemented by all decoders.
@@ -38,15 +38,8 @@ impl DecoderContext {
             | CodecId::PcmF32Le
             | CodecId::PcmU8 => Box::new(PcmDecoder::new(params)?),
             CodecId::RawVideo => Box::new(RawVideoDecoder::new(params)?),
-            other => {
-                // Allow registry-based extension later.
-                if global().find_decoder(other).is_some() {
-                    return Err(Error::unsupported(format!(
-                        "codec {other} is registered but has no built-in implementation yet"
-                    )));
-                }
-                return Err(Error::not_found(format!("decoder for {other}")));
-            }
+            CodecId::H264 => Box::new(H264Decoder::new(params)?),
+            other => return Err(Error::not_found(format!("decoder for {other}"))),
         };
         Ok(Self {
             inner,

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rumpeg-util",
+    "crates/rumpeg-h264",
     "crates/rumpeg-codec",
     "crates/rumpeg-format",
     "crates/rumpeg-scale",
@@ -22,6 +23,7 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 rumpeg-util = { path = "crates/rumpeg-util", version = "0.1.0" }
+rumpeg-h264 = { path = "crates/rumpeg-h264", version = "0.1.0" }
 rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.0" }
 rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.0" }
 rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.0" }
@@ -32,6 +34,7 @@ thiserror = "2"
 byteorder = "1.5"
 tracing = "0.1"
 clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.release]
 lto = "thin"

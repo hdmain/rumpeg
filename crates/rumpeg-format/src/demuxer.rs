@@ -1,6 +1,8 @@
 //! Demuxer trait and input format context.
 
+use crate::h264raw::H264RawDemuxer;
 use crate::io::{IoReader, MediaIo};
+use crate::mp4::Mp4Demuxer;
 use crate::probe;
 use crate::stream::Stream;
 use crate::wav::WavDemuxer;
@@ -42,6 +44,8 @@ impl FormatContext {
         io.seek(std::io::SeekFrom::Start(0))?;
         let demuxer: Box<dyn Demuxer> = match probed.format_name {
             "wav" => Box::new(WavDemuxer::open(&mut io)?),
+            "mp4" => Box::new(Mp4Demuxer::open(&mut io)?),
+            "h264" => Box::new(H264RawDemuxer::open(&mut io)?),
             other => {
                 return Err(Error::unsupported(format!(
                     "no demuxer for format '{other}'"

@@ -1,5 +1,7 @@
 //! Encoder trait and context.
 
+use crate::h264::H264Encoder;
+use crate::jpeg::JpegEncoderCodec;
 use crate::pcm::PcmEncoder;
 use crate::rawvideo::RawVideoEncoder;
 use rumpeg_util::{CodecId, CodecParams, Error, Frame, Packet, Result};
@@ -37,6 +39,8 @@ impl EncoderContext {
             | CodecId::PcmF32Le
             | CodecId::PcmU8 => Box::new(PcmEncoder::new(params)?),
             CodecId::RawVideo => Box::new(RawVideoEncoder::new(params)?),
+            CodecId::H264 => Box::new(H264Encoder::new(params)?),
+            CodecId::Mjpeg => Box::new(JpegEncoderCodec::new(params)?),
             other => return Err(Error::not_found(format!("encoder for {other}"))),
         };
         Ok(Self {
