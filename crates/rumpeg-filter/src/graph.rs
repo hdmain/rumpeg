@@ -2,7 +2,7 @@
 
 use crate::filters::{
     AFormatFilter, AresampleFilter, CropFilter, EqFilter, FormatFilter, FpsFilter, FramestepFilter,
-    HFlipFilter, HueFilter, OverlayFilter, PadFilter, ScaleFilter, TransposeFilter, VFlipFilter,
+    HFlipFilter, HueFilter, OverlayElement, OverlayFilter, PadFilter, ScaleFilter, TransposeFilter, VFlipFilter,
     VolumeFilter,
 };
 use rumpeg_util::{Error, Frame, Result};
@@ -54,6 +54,13 @@ impl Graph {
     /// Append a filter.
     pub fn push(&mut self, filter: Box<dyn Filter>) {
         self.filters.push(filter);
+    }
+
+    /// Add a timestamped image, text or rectangle overlay.
+    pub fn add_overlay(&mut self, element: OverlayElement, time_base: rumpeg_util::Rational) {
+        let mut overlay = OverlayFilter::new(time_base);
+        overlay.push(element);
+        self.filters.push(Box::new(overlay));
     }
 
     /// Run the graph on a single frame (requires ≥1 output).
@@ -116,7 +123,11 @@ fn parse_one(spec: &str) -> Result<Box<dyn Filter>> {
         "eq" => Box::new(EqFilter::parse(args)?),
         "hue" => Box::new(HueFilter::parse(args)?),
         "aresample" => Box::new(AresampleFilter::parse(args)?),
-        "overlay" => Box::new(OverlayFilter::parse(args)?),
+        "overlay" => {
+            return Err(Error::unsupported(
+                "overlay needs an element source; use Graph::add_overlay or CLI --overlay",
+            ));
+        }
         "null" | "anull" => Box::new(NullFilter),
         other => {
             return Err(Error::not_found(format!("filter '{other}'")));

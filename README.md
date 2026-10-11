@@ -144,7 +144,17 @@ Useful convert knobs: `--map`, `-c` / `--c:v` / `--c:a` (including `copy`), `--f
 | AAC | yes | LC encode (`rusty_aac`) |
 | Opus | yes | yes (`rusty-opus`) |
 
-**Filters** (`filter=a,b,c` / `--vf`): `volume`, `aformat`, `aresample`, `format`, `scale`, `hflip`, `vflip`, `crop`, `pad`, `transpose`, `fps` (real source rate + PTS rewrite), `framestep`, `eq`, `hue`, `overlay` (passthrough until dual-input graphs exist), `null` / `anull`.
+**Filters** (`filter=a,b,c` / `--vf`): `volume`, `aformat`, `aresample`, `format`, `scale`, `hflip`, `vflip`, `crop`, `pad`, `transpose`, `fps` (real source rate + PTS rewrite), `framestep`, `eq`, `hue`, `null` / `anull`. Timed image, text, and rectangle overlays are composited by the library graph API and CLI `--overlay` option.
+
+MP4 video transcodes include the first audio stream by default and encode it as AAC. For example:
+
+```sh
+rumpeg convert -i input.mp4 -o rendered.mp4 --vf scale=1280:-2 \
+  --overlay 'kind=text;text=RUMPEG;x=24;y=24;from=1.5;to=5;color=#ffffff;scale=2' \
+  --overlay 'kind=rect;x=20;y=20;width=160;height=32;color=#00000099;from=1.5;to=5'
+```
+
+Overlay times are seconds on the input video timeline; positions are pixels from the top-left. `kind=image` uses `path=...`, with optional `opacity=0..255`; `kind=text` supports a built-in 5×7 uppercase/digit font; `kind=rect` uses `width`, `height`, and `color` (`#RRGGBB` or `#RRGGBBAA`). The library exposes `rumpeg::filter::OverlayElement` and `Graph::add_overlay` for the same operations.
 
 **Honest gaps**
 - No AV1 / VP8 registration until a clean pure-Rust decode wrap exists
@@ -154,6 +164,7 @@ Useful convert knobs: `--map`, `-c` / `--c:v` / `--c:a` (including `copy`), `--f
 - Exotic chroma / MBAFF out of scope
 - Audio bitrate knobs are accepted but not deeply applied beyond PCM paths
 - `libx264` / `h264_nvenc` require optional Cargo features + system deps/driver
+- Overlay composition currently converts frames through RGB on the CPU; audio is retained for MP4 output and re-encoded as AAC
 
 ## License
 

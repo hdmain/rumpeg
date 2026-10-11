@@ -28,8 +28,8 @@ rumpeg-codec = { path = "crates/rumpeg-codec", version = "0.1.2" }
 rumpeg-format = { path = "crates/rumpeg-format", version = "0.1.2" }
 rumpeg-scale = { path = "crates/rumpeg-scale", version = "0.1.2" }
 rumpeg-resample = { path = "crates/rumpeg-resample", version = "0.1.2" }
-rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.2" }
-rumpeg = { path = "crates/rumpeg", version = "0.1.2" }
+rumpeg-filter = { path = "crates/rumpeg-filter", version = "0.1.3" }
+rumpeg = { path = "crates/rumpeg", version = "0.1.3" }
 thiserror = "2"
 byteorder = "1.5"
 matroska-demuxer = "0.8"

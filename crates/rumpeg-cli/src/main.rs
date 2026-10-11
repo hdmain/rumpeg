@@ -38,6 +38,9 @@ enum Commands {
         /// Video filterchain (e.g. `scale=16:16`, `fps=24`).
         #[arg(long = "vf")]
         vf: Option<String>,
+        /// Add a timed overlay (repeatable). Example: `kind=text;text=HELLO;x=24;y=24;from=1;to=4;color=#ffffff`
+        #[arg(long = "overlay", action = clap::ArgAction::Append)]
+        overlay: Vec<String>,
         /// Target frame rate (alias for injecting `fps=N` into `--vf`).
         #[arg(long = "fps", short = 'r', value_name = "FPS")]
         fps: Option<u32>,
@@ -113,6 +116,7 @@ fn run(cli: Cli) -> Result<()> {
             output,
             filter,
             vf,
+            overlay,
             fps,
             frames,
             ar,
@@ -150,6 +154,7 @@ fn run(cli: Cli) -> Result<()> {
             gop,
             fast,
             quality_video,
+            &overlay,
         ),
         Commands::Codecs => cmd_codecs(),
         Commands::Formats => {
@@ -233,6 +238,36 @@ fn still_image_codec(path: &Path) -> Option<CodecId> {
     }
 }
 
+fn parse_overlay(spec: &str) -> Result<rumpeg::filter::OverlayElement> {
+    use rumpeg::filter::OverlayElement;
+    let mut fields = std::collections::HashMap::new();
+    for field in spec.split(';') {
+        let (key, value) = field.split_once('=').ok_or_else(|| Error::invalid_data("overlay fields must use key=value separated by ';'"))?;
+        fields.insert(key.trim(), value.trim());
+    }
+    let get = |key: &str| fields.get(key).copied().ok_or_else(|| Error::invalid_data(format!("overlay missing '{key}'")));
+    let number = |key: &str| -> Result<i32> { get(key)?.parse().map_err(|_| Error::invalid_data(format!("invalid overlay {key}"))) };
+    let optional_seconds = |key: &str| -> Result<Option<f64>> { fields.get(key).map(|v| v.parse().map_err(|_| Error::invalid_data(format!("invalid overlay {key}")))).transpose() };
+    let color = || -> Result<[u8; 4]> {
+        let raw = get("color")?.trim_start_matches('#');
+        if raw.len() != 6 && raw.len() != 8 { return Err(Error::invalid_data("overlay color must be #RRGGBB or #RRGGBBAA")); }
+        let mut c = [0, 0, 0, 255];
+        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() { c[i] = u8::from_str_radix(std::str::from_utf8(chunk).map_err(|_| Error::invalid_data("invalid overlay color"))?, 16).map_err(|_| Error::invalid_data("invalid overlay color"))?; }
+        Ok(c)
+    };
+    let x = number("x")?; let y = number("y")?;
+    let from = optional_seconds("from")?; let to = optional_seconds("to")?;
+    if from.is_some_and(|v| !v.is_finite() || v < 0.0) || to.is_some_and(|v| !v.is_finite() || v < 0.0) || matches!((from,to),(Some(a),Some(b)) if b <= a) {
+        return Err(Error::invalid_data("overlay time range must be non-negative and end after start"));
+    }
+    match get("kind")? {
+        "image" => OverlayElement::image_file(get("path")?, x, y, from, to, fields.get("opacity").map(|s| s.parse::<u8>().map_err(|_| Error::invalid_data("invalid overlay opacity"))).transpose()?.unwrap_or(255)),
+        "text" => Ok(OverlayElement::text(get("text")?, x, y, color()?, fields.get("scale").map(|s| s.parse::<u32>().map_err(|_| Error::invalid_data("invalid text scale"))).transpose()?.unwrap_or(1), from, to)),
+        "rect" => Ok(OverlayElement::rectangle(x, y, get("width")?.parse().map_err(|_| Error::invalid_data("invalid rectangle width"))?, get("height")?.parse().map_err(|_| Error::invalid_data("invalid rectangle height"))?, color()?, from, to)),
+        _ => Err(Error::invalid_data("overlay kind must be image, text, or rect")),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_convert(
     input: &PathBuf,
@@ -255,6 +290,7 @@ fn cmd_convert(
     gop: Option<u32>,
     fast: bool,
     quality_video: Option<u8>,
+    overlays: &[String],
 ) -> Result<()> {
     let video_filter = merge_vf_fps(video_filter, fps)?;
     let mut video_filter = video_filter;
@@ -313,7 +349,8 @@ fn cmd_convert(
     let bit_rate_video = bit_rate_video.as_deref();
     let encode_preset = encode_preset.as_deref();
 
-    let reencode_video = fps.is_some()
+    let reencode_video = !overlays.is_empty()
+        || fps.is_some()
         || bit_rate_video.is_some()
         || crf.is_some()
         || qp.is_some()
@@ -365,6 +402,7 @@ fn cmd_convert(
             qp,
             gop,
             quality_video,
+            overlays,
         );
     }
 
@@ -387,6 +425,7 @@ fn cmd_convert(
             qp,
             gop,
             quality_video,
+            overlays,
         );
     }
     drop(probe);
@@ -482,6 +521,7 @@ fn try_convert_video(
     qp: Option<i32>,
     gop: Option<u32>,
     quality_video: Option<u8>,
+    overlays: &[String],
 ) -> Result<()> {
     let mut demuxer = format::open_input(input)?;
     let in_stream = stream_from_map(&demuxer, map, MediaType::Video)?.clone();
@@ -599,6 +639,9 @@ fn try_convert_video(
         .map(Graph::parse)
         .transpose()?
         .unwrap_or_default();
+    for spec in overlays {
+        graph.add_overlay(parse_overlay(spec)?, in_stream.time_base);
+    }
     graph.set_fps_source(source_fps);
 
     if let Some(target) = graph.target_fps() {
