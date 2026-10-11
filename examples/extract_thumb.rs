@@ -34,7 +34,7 @@ fn main() -> Result<()> {
         yuv.u[i] = 128;
         yuv.v[i] = 128;
     }
-    let enc = rumpeg::h264::Encoder::new(w, h).map_err(map_h264)?;
+    let mut enc = rumpeg::h264::Encoder::new(w, h).map_err(map_h264)?;
     std::fs::write(&h264_path, enc.encode_annexb(&yuv).map_err(map_h264)?)?;
 
     rumpeg::extract_first_frame_jpeg(&h264_path, &jpg_path, Some((16, 16)))?;
