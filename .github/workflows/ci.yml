@@ -40,7 +40,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-features
+        # Optional x264/NVENC backends require system libraries or GPU drivers.
+        run: cargo test --workspace
 
       - name: Build release
         run: cargo build --workspace --release

@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "multimedia"]
 [[bin]]
 name = "rumpeg"
 path = "src/main.rs"
+doc = false
 
 [features]
 default = []
