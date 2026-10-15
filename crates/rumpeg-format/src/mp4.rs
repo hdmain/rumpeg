@@ -1,4 +1,4 @@
-//! Minimal ISOBMFF / MP4 demuxer + single-frame muxer for `avc1` / H.264.
+//! ISOBMFF / MP4 demuxing and muxing for H.264 / HEVC video and AAC audio.
 
 use crate::demuxer::Demuxer;
 use crate::io::{IoReader, IoWriter};
@@ -26,10 +26,11 @@ struct SampleEntry {
     offset: u64,
     size: u32,
     cts: i64,
+    dts: i64,
     is_key: bool,
 }
 
-/// MP4 demuxer (`avc1` video and optional `mp4a` AAC).
+/// MP4 demuxer (H.264 / HEVC video and optional AAC audio).
 pub struct Mp4Demuxer {
     streams: Vec<Stream>,
     samples: Vec<SampleEntry>,
@@ -68,7 +69,7 @@ impl Demuxer for Mp4Demuxer {
         let mut pkt = Packet::new(Buffer::from_vec(buf));
         pkt.stream_index = sample.stream_index;
         pkt.pts = Timestamp::new(sample.cts);
-        pkt.dts = pkt.pts;
+        pkt.dts = Timestamp::new(sample.dts);
         if sample.is_key {
             pkt.flags.insert(PacketFlags::KEY);
         }
@@ -97,6 +98,7 @@ enum TrackKind {
         width: u32,
         height: u32,
         avcc: Vec<u8>,
+        codec_id: CodecId,
         #[allow(dead_code)]
         length_size: usize,
     },
@@ -198,11 +200,12 @@ fn track_to_stream(index: usize, track: &TrackInfo, time_base: Rational) -> Stre
             width,
             height,
             avcc,
+            codec_id,
             ..
         } => {
             let frame_rate = estimate_frame_rate(track);
             let mut params = CodecParams::video_codec(
-                CodecId::H264,
+                *codec_id,
                 VideoParams {
                     pix_fmt: PixelFormat::Yuv420p,
                     width: *width,
@@ -254,8 +257,8 @@ fn estimate_frame_rate(track: &TrackInfo) -> Rational {
     if track.timescale == 0 || track.samples.len() < 2 {
         return Rational::new(25, 1);
     }
-    let last = track.samples.last().unwrap().cts;
-    let first = track.samples.first().unwrap().cts;
+    let last = track.samples.last().unwrap().dts;
+    let first = track.samples.first().unwrap().dts;
     let span = (last - first).max(1) as u64;
     let n = (track.samples.len() - 1) as u64;
     // fps ≈ n * timescale / span
@@ -381,6 +384,7 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
     let mut stco = None;
     let mut co64 = None;
     let mut stss = None;
+    let mut ctts = None;
     let mut i = 0;
     while i + 8 <= stbl.len() {
         let size = u32::from_be_bytes(stbl[i..i + 4].try_into().unwrap()) as usize;
@@ -397,12 +401,13 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             b"stco" => stco = Some(payload),
             b"co64" => co64 = Some(payload),
             b"stss" => stss = Some(payload),
+            b"ctts" => ctts = Some(payload),
             _ => {}
         }
         i += size;
     }
     let stsd = stsd.ok_or_else(|| Error::invalid_data("missing stsd"))?;
-    let (width, height, avcc, length_size) = parse_stsd_avc1(stsd)?;
+    let (width, height, avcc, length_size, codec_id) = parse_stsd_video(stsd)?;
     let sizes = parse_stsz(stsz.ok_or_else(|| Error::invalid_data("missing stsz"))?)?;
     let chunk_offsets = if let Some(stco) = stco {
         parse_stco(stco)?
@@ -414,6 +419,7 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
     let stsc = parse_stsc(stsc.ok_or_else(|| Error::invalid_data("missing stsc"))?)?;
     let stts = parse_stts(stts.ok_or_else(|| Error::invalid_data("missing stts"))?)?;
     let keyframes = parse_stss(stss);
+    let composition_offsets = parse_ctts(ctts, sizes.len())?;
 
     let sample_offsets = expand_sample_offsets(&chunk_offsets, &stsc, &sizes)?;
     if sample_offsets.len() != sizes.len() {
@@ -432,7 +438,8 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             stream_index: 0,
             offset,
             size,
-            cts,
+            cts: cts + composition_offsets[idx],
+            dts: cts,
             is_key,
         });
         cts += i64::from(dur);
@@ -449,6 +456,7 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             width,
             height,
             avcc,
+            codec_id,
             length_size,
         },
         timescale,
@@ -509,6 +517,7 @@ fn parse_stbl_audio(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             offset,
             size,
             cts,
+            dts: cts,
             is_key: idx == 0,
         });
         cts += i64::from(dur);
@@ -531,7 +540,7 @@ fn parse_stbl_audio(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
 }
 
 fn parse_stsd_mp4a(stsd: &[u8]) -> Result<(u32, u16, Vec<u8>)> {
-    if stsd.len() < 8 {
+    if stsd.len() < 16 {
         return Err(Error::invalid_data("stsd"));
     }
     let entry_count = u32::from_be_bytes(stsd[4..8].try_into().unwrap());
@@ -600,9 +609,9 @@ fn parse_esds_audio_specific_config(esds: &[u8]) -> Result<Vec<u8>> {
     Err(Error::invalid_data("esds missing ASC"))
 }
 
-fn parse_stsd_avc1(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize)> {
+fn parse_stsd_video(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize, CodecId)> {
     // version(1)+flags(3)+entry_count(4)
-    if stsd.len() < 8 {
+    if stsd.len() < 16 {
         return Err(Error::invalid_data("stsd"));
     }
     let entry_count = u32::from_be_bytes(stsd[4..8].try_into().unwrap());
@@ -612,9 +621,10 @@ fn parse_stsd_avc1(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize)> {
     let i = 8;
     let size = u32::from_be_bytes(stsd[i..i + 4].try_into().unwrap()) as usize;
     let typ = &stsd[i + 4..i + 8];
-    if typ != b"avc1" && typ != b"avc3" {
+    let hevc = typ == b"hvc1" || typ == b"hev1";
+    if !hevc && typ != b"avc1" && typ != b"avc3" {
         return Err(Error::unsupported(format!(
-            "sample entry {} (only avc1)",
+            "sample entry {} (expected avc1/avc3/hvc1/hev1)",
             String::from_utf8_lossy(typ)
         )));
     }
@@ -636,16 +646,52 @@ fn parse_stsd_avc1(stsd: &[u8]) -> Result<(u32, u32, Vec<u8>, usize)> {
         if bsize < 8 || j + bsize > entry.len() {
             break;
         }
-        if btyp == b"avcC" {
+        if hevc && btyp == b"hvcC" {
+            let hvcc = entry[j + 8..j + bsize].to_vec();
+            let cfg = rumpeg_util::hevc::HevcConfig::parse(&hvcc)?;
+            return Ok((width, height, hvcc, cfg.length_size, CodecId::Hevc));
+        }
+        if !hevc && btyp == b"avcC" {
             let avcc = entry[j + 8..j + bsize].to_vec();
             let cfg = rumpeg_h264::AvcDecoderConfig::from_avcc(&avcc)
                 .map_err(|e| Error::invalid_data(e.to_string()))?;
-            return Ok((width, height, avcc, cfg.length_size()));
+            return Ok((width, height, avcc, cfg.length_size(), CodecId::H264));
         }
         j += bsize;
     }
     let _ = i;
-    Err(Error::invalid_data("avc1 missing avcC"))
+    Err(Error::invalid_data("video sample entry missing avcC/hvcC"))
+}
+
+fn parse_ctts(payload: Option<&[u8]>, samples: usize) -> Result<Vec<i64>> {
+    let Some(data) = payload else {
+        return Ok(vec![0; samples]);
+    };
+    if data.len() < 8 || data[0] > 1 {
+        return Err(Error::invalid_data("invalid ctts header"));
+    }
+    let entries = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
+    if entries > (data.len() - 8) / 8 {
+        return Err(Error::invalid_data("truncated ctts"));
+    }
+    let mut offsets = Vec::with_capacity(samples);
+    for entry in data[8..8 + entries * 8].chunks_exact(8) {
+        let count = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+        let raw = u32::from_be_bytes(entry[4..].try_into().unwrap());
+        let offset = if data[0] == 1 {
+            i64::from(raw as i32)
+        } else {
+            i64::from(raw)
+        };
+        if count > samples - offsets.len() {
+            return Err(Error::invalid_data("ctts sample count mismatch"));
+        }
+        offsets.resize(offsets.len() + count, offset);
+    }
+    if offsets.len() != samples {
+        return Err(Error::invalid_data("ctts sample count mismatch"));
+    }
+    Ok(offsets)
 }
 
 fn parse_stsz(payload: &[u8]) -> Result<Vec<u32>> {
@@ -790,7 +836,7 @@ fn expand_sample_offsets(
     Ok(offsets)
 }
 
-/// Minimal MP4 muxer: one H.264 video track + optional AAC audio track.
+/// Minimal MP4 muxer: one H.264 / HEVC video track + optional AAC audio track.
 pub struct Mp4Muxer {
     streams: Vec<Stream>,
     video: Option<VideoMuxState>,
@@ -798,6 +844,7 @@ pub struct Mp4Muxer {
 }
 
 struct VideoMuxState {
+    codec_id: CodecId,
     width: u16,
     height: u16,
     extradata: Vec<u8>,
@@ -842,7 +889,7 @@ impl Muxer for Mp4Muxer {
 
     fn add_stream(&mut self, params: CodecParams) -> Result<usize> {
         match params.codec_id {
-            CodecId::H264 => {
+            CodecId::H264 | CodecId::Hevc => {
                 if self.video.is_some() {
                     return Err(Error::invalid_data("MP4 muxer supports one video stream"));
                 }
@@ -851,8 +898,16 @@ impl Muxer for Mp4Muxer {
                     .ok_or_else(|| Error::invalid_data("video params required"))?;
                 if params.extradata.is_empty() {
                     return Err(Error::invalid_data(
-                        "H.264 MP4 mux requires avcC extradata on the stream",
+                        "MP4 video requires avcC/hvcC extradata on the stream",
                     ));
+                }
+                if params.codec_id == CodecId::Hevc {
+                    let cfg = rumpeg_util::hevc::HevcConfig::parse(&params.extradata)?;
+                    if cfg.length_size != 4 {
+                        return Err(Error::unsupported(
+                            "HEVC MP4 mux requires 4-byte NAL lengths",
+                        ));
+                    }
                 }
                 let mut timescale = 1000u32;
                 let mut sample_delta = 40u32;
@@ -863,6 +918,7 @@ impl Muxer for Mp4Muxer {
                 }
                 let idx = self.streams.len();
                 self.video = Some(VideoMuxState {
+                    codec_id: params.codec_id,
                     width: video.width as u16,
                     height: video.height as u16,
                     extradata: params.extradata.clone(),
@@ -903,7 +959,7 @@ impl Muxer for Mp4Muxer {
                 Ok(idx)
             }
             other => Err(Error::unsupported(format!(
-                "MP4 muxer supports avc1/H.264 and mp4a/AAC only (got {other})"
+                "MP4 muxer supports H.264, HEVC and AAC (got {other})"
             ))),
         }
     }
@@ -919,14 +975,23 @@ impl Muxer for Mp4Muxer {
     fn write_packet(&mut self, _writer: &mut dyn IoWriter, packet: &Packet) -> Result<()> {
         if let Some(v) = self.video.as_mut() {
             if packet.stream_index == v.stream_index {
-                let data = if packet.data.windows(4).any(|w| w == [0, 0, 0, 1])
+                let data = if v.codec_id == CodecId::Hevc
+                    && rumpeg_util::hevc::sample_to_annexb(packet.data.as_slice(), 4).is_ok()
+                {
+                    packet.data.as_slice().to_vec()
+                } else if packet.data.windows(4).any(|w| w == [0, 0, 0, 1])
                     || packet.data.windows(3).any(|w| w == [0, 0, 1])
                 {
                     rumpeg_h264::annexb_to_avcc_sample(packet.data.as_slice())
                 } else {
                     packet.data.as_slice().to_vec()
                 };
-                let filtered = filter_avcc_vcl(&data)?;
+                let filtered = if v.codec_id == CodecId::Hevc {
+                    rumpeg_util::hevc::sample_to_annexb(&data, 4)?;
+                    data
+                } else {
+                    filter_avcc_vcl(&data)?
+                };
                 v.samples.push(filtered);
                 v.sample_is_key
                     .push(packet.flags.contains(PacketFlags::KEY));
@@ -1143,7 +1208,7 @@ fn build_video_trak(
         b
     });
     let dinf = build_dinf();
-    let avc1 = build_avc1(video.width, video.height, &video.extradata)?;
+    let avc1 = build_video_entry(video.width, video.height, &video.extradata, video.codec_id)?;
     let stsd = box_of(b"stsd", {
         let mut b = Vec::new();
         b.extend_from_slice(&0u32.to_be_bytes());
@@ -1364,7 +1429,7 @@ fn build_esds(asc: &[u8]) -> Result<Vec<u8>> {
     Ok(box_of(b"esds", payload))
 }
 
-fn build_avc1(width: u16, height: u16, avcc: &[u8]) -> Result<Vec<u8>> {
+fn build_video_entry(width: u16, height: u16, avcc: &[u8], codec_id: CodecId) -> Result<Vec<u8>> {
     let mut body = vec![0u8; 78];
     // after size+type added by box_of -- VisualSampleEntry fields start at 0 of body:
     // reserved 6, data_ref 2, predef/reserved 16, width/height at 24/26 of body...
@@ -1379,9 +1444,10 @@ fn build_avc1(width: u16, height: u16, avcc: &[u8]) -> Result<Vec<u8>> {
                                                        // compressor name (32 bytes) already zero
     body[74..76].copy_from_slice(&0x0018u16.to_be_bytes()); // depth
     body[76..78].copy_from_slice(&0xffffu16.to_be_bytes());
-    let avcc_box = box_of(b"avcC", avcc.to_vec());
+    let hevc = codec_id == CodecId::Hevc;
+    let avcc_box = box_of(if hevc { b"hvcC" } else { b"avcC" }, avcc.to_vec());
     body.extend_from_slice(&avcc_box);
-    Ok(box_of(b"avc1", body))
+    Ok(box_of(if hevc { b"hev1" } else { b"avc1" }, body))
 }
 
 fn box_of(typ: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
@@ -1391,4 +1457,23 @@ fn box_of(typ: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
     out.extend_from_slice(typ);
     out.extend_from_slice(&payload);
     out
+}
+
+#[cfg(test)]
+mod hevc_timing_tests {
+    use super::*;
+    #[test]
+    fn signed_and_unsigned_composition_offsets() {
+        let mut ctts = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        ctts.extend_from_slice(&2u32.to_be_bytes());
+        ctts.extend_from_slice(&(-2i32).to_be_bytes());
+        assert_eq!(
+            parse_ctts(Some(&ctts), 2).unwrap(),
+            vec![u32::MAX as i64 - 1; 2]
+        );
+        ctts[0] = 1;
+        assert_eq!(parse_ctts(Some(&ctts), 2).unwrap(), vec![-2; 2]);
+        assert!(parse_ctts(Some(&ctts), 1).is_err());
+        assert!(parse_ctts(Some(&ctts[..15]), 2).is_err());
+    }
 }

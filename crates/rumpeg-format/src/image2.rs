@@ -90,31 +90,6 @@ fn detect_image_codec(data: &[u8]) -> Result<CodecId> {
     Err(Error::invalid_data("image2: not JPEG or PNG"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn probe_jpeg_png() {
-        assert_eq!(probe_score(&[0xFF, 0xD8, 0xFF]), 85);
-        assert_eq!(
-            probe_score(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
-            85
-        );
-    }
-
-    #[test]
-    fn demux_single_jpeg_packet() {
-        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
-        let mut io = Cursor::new(jpeg.clone());
-        let mut demux = Image2Demuxer::open(&mut io).unwrap();
-        let pkt = demux.read_packet(&mut io).unwrap();
-        assert_eq!(pkt.data.as_slice(), jpeg.as_slice());
-        assert!(demux.read_packet(&mut io).is_err());
-    }
-}
-
 /// Writes one still-image bitstream packet to the output file.
 pub struct Image2Muxer {
     streams: Vec<Stream>,
@@ -192,5 +167,30 @@ impl Muxer for Image2Muxer {
             return Err(Error::invalid_data("no image packet written"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn probe_jpeg_png() {
+        assert_eq!(probe_score(&[0xFF, 0xD8, 0xFF]), 85);
+        assert_eq!(
+            probe_score(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            85
+        );
+    }
+
+    #[test]
+    fn demux_single_jpeg_packet() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
+        let mut io = Cursor::new(jpeg.clone());
+        let mut demux = Image2Demuxer::open(&mut io).unwrap();
+        let pkt = demux.read_packet(&mut io).unwrap();
+        assert_eq!(pkt.data.as_slice(), jpeg.as_slice());
+        assert!(demux.read_packet(&mut io).is_err());
     }
 }

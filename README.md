@@ -60,11 +60,32 @@ rumpeg convert -i input.mp4 -o out.mp4 -c:v libx264 --preset fast -b:v 1500k
 | `-b:a` | AAC audio bitrate (default `128k` when muxing audio) |
 | `--crf` / `--qp` / `--gop` | H.264 quality / GOP |
 | `--preset` | Speed/quality (`fast`, `medium`, `slow`, …) |
-| `-c:v` | `h264` (default rusty), `libx264`, `h264_nvenc`, `native` |
+| `-c:v` | `h264` (default rusty), `hevc` / `h265`, `libx264`, `h264_nvenc`, `native` |
 
-**MP4 output** re-encodes **H.264 video + AAC audio** when the source has an audio track. Large sources without scale/bitrate auto-apply `scale=640:-2 -b:v 800k --preset fast`.
+**MP4 output** re-encodes **H.264 (default) or HEVC (`-c:v hevc`) video + AAC audio** when the source has an audio track. Large sources without scale/bitrate auto-apply `scale=640:-2 -b:v 800k --preset fast`.
 
 **Default encoder:** [`rusty_h264-encoder`](https://crates.io/crates/rusty_h264-encoder) — pure-Rust **motion estimation**, **CABAC**, **ABR**, portable SIMD (no OpenH264 FFI). Optional: system **libx264** / **NVIDIA NVENC**.
+
+## HEVC / H.265
+
+HEVC decoding accepts MP4 `hvc1` / `hev1` with `hvcC`, Matroska, MPEG-TS,
+and raw Annex-B streams. Raw streams use a default 25 fps timeline.
+The software encoder is pure Rust (`oxideav-h265`), with I/P frames,
+periodic IDR (`--gop`), fixed QP (`--qp`, or `--crf` mapped to QP), and average
+bitrate (`-b:v`). It accepts 8-bit YUV420 with positive even dimensions;
+internal padding to multiples of 16 is cropped back in the bitstream.
+HEVC currently does not expose speed presets or B-frame encoding; 10-bit
+output is rejected explicitly by the decoder.
+
+```bash
+rumpeg convert -i input.mp4 -o output.mp4 -c:v hevc -b:v 1500k --gop 50
+rumpeg convert -i input.mp4 -o output.hevc -c:v h265 --qp 28
+rumpeg convert -i input.hevc -o thumbnail.jpg --frames 1
+```
+
+The library uses `CodecId::Hevc` with `codec::open_encoder`; the returned
+encoder parameters include `hvcC` extradata for MP4 muxing. Encoder packets
+are Annex-B; MP4 demuxer packets are length-prefixed as described by `hvcC`.
 
 ## H.264 notes
 
@@ -115,21 +136,21 @@ Useful convert knobs: `--map`, `-c` / `--c:v` / `--c:a` (including `copy`), `--f
 
 **Containers (demux)**
 - WAV (PCM)
-- MP4 / ISOBMFF: `avc1` H.264 + optional `mp4a` AAC (multi-track); frame rate from sample timing
+- MP4 / ISOBMFF: `avc1`/`avc3` H.264 or `hvc1`/`hev1` HEVC + optional `mp4a` AAC (multi-track); frame rate from sample timing
 - Matroska / WebM (via `matroska-demuxer`)
-- MPEG-TS (minimal PAT/PMT/PES; H.264 + AAC)
-- Annex-B `.h264`
+- MPEG-TS (minimal PAT/PMT/PES; H.264 / HEVC + AAC)
+- Annex-B `.h264`, `.hevc` / `.h265` / `.265`
 - image2 demux: `.jpg` / `.png` as a single video packet
 
 **Containers (mux)**
-- WAV, MP4 (`avc1` H.264 + optional `mp4a` AAC), image2 (JPEG/PNG)
+- WAV, MP4 (`avc1` H.264 or `hev1` HEVC + optional AAC), raw Annex-B HEVC, image2 (JPEG/PNG)
 - MKV / WebM / MPEG-TS mux: **not implemented** (demux only)
 
 **Video codecs**
 | Codec | Decode | Encode |
 |-------|--------|--------|
 | H.264 | yes (CABAC+CAVLC) | rusty_h264 ME/CABAC/ABR (default); optional libx264 / NVENC; `native` Intra+P |
-| HEVC | yes (`rusty_h265`, Progressive 8-bit path) | no |
+| HEVC | yes (`rusty_h265`, progressive 8-bit 4:2:0) | pure-Rust I/P + QP/ABR (`oxideav-h265`) |
 | VP9 | yes (`rusty_vp9`) | no |
 | VP8 | **no** (not registered) | no |
 | AV1 | **no** (not registered; `rav1d` has C-ABI only) | no |

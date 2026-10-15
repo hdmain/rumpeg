@@ -2,8 +2,8 @@
 
 use crate::filters::{
     AFormatFilter, AresampleFilter, CropFilter, EqFilter, FormatFilter, FpsFilter, FramestepFilter,
-    HFlipFilter, HueFilter, OverlayElement, OverlayFilter, PadFilter, ScaleFilter, TransposeFilter, VFlipFilter,
-    VolumeFilter,
+    HFlipFilter, HueFilter, OverlayElement, OverlayFilter, PadFilter, ScaleFilter, TransposeFilter,
+    VFlipFilter, VolumeFilter,
 };
 use rumpeg_util::{Error, Frame, Result};
 
@@ -200,8 +200,13 @@ mod tests {
         let mut src = rgb2(4, 4, &[(10, 20, 30); 16]);
         src.pts = Timestamp::new(1234);
         let output = graph.run(Frame::Video(src)).unwrap();
-        let Frame::Video(output) = output else { panic!("expected video frame") };
-        assert_eq!((output.width, output.height, output.format), (4, 4, PixelFormat::Rgb24));
+        let Frame::Video(output) = output else {
+            panic!("expected video frame")
+        };
+        assert_eq!(
+            (output.width, output.height, output.format),
+            (4, 4, PixelFormat::Rgb24)
+        );
         assert_eq!(output.pts, Timestamp::new(1234));
         let p = output.plane(0).unwrap();
         let pixel = |x: usize, y: usize| &p[(y * output.strides[0] + x * 3)..][..3];
@@ -223,29 +228,49 @@ mod tests {
             frame.pts = Timestamp::new(pts);
             frame
         };
-        let Frame::Video(before) = graph.run(Frame::Video(frame_at(500))).unwrap() else { panic!("expected video") };
+        let Frame::Video(before) = graph.run(Frame::Video(frame_at(500))).unwrap() else {
+            panic!("expected video")
+        };
         assert_eq!(&before.plane(0).unwrap()[..3], &[10, 20, 30]);
-        let Frame::Video(active) = graph.run(Frame::Video(frame_at(1500))).unwrap() else { panic!("expected video") };
+        let Frame::Video(active) = graph.run(Frame::Video(frame_at(1500))).unwrap() else {
+            panic!("expected video")
+        };
         assert_eq!(&active.plane(0).unwrap()[..3], &[0, 255, 0]);
-        let Frame::Video(after) = graph.run(Frame::Video(frame_at(2000))).unwrap() else { panic!("expected video") };
+        let Frame::Video(after) = graph.run(Frame::Video(frame_at(2000))).unwrap() else {
+            panic!("expected video")
+        };
         assert_eq!(&after.plane(0).unwrap()[..3], &[10, 20, 30]);
     }
 
     #[test]
     fn image_and_text_overlays_draw_visible_pixels() {
         let mut image = VideoFrame::alloc(PixelFormat::Rgba, 1, 1);
-        image.plane_mut(0).unwrap().copy_from_slice(&[0, 0, 255, 255]);
+        image
+            .plane_mut(0)
+            .unwrap()
+            .copy_from_slice(&[0, 0, 255, 255]);
         let mut graph = Graph::new();
         graph.add_overlay(
-            OverlayElement::Image { frame: image, x: 5, y: 0, start: None, end: None, opacity: 255 },
+            OverlayElement::Image {
+                frame: image,
+                x: 5,
+                y: 0,
+                start: None,
+                end: None,
+                opacity: 255,
+            },
             Rational::new(1, 1),
         );
         graph.add_overlay(
             OverlayElement::text("A", 0, 0, [255, 255, 255, 255], 1, None, None),
             Rational::new(1, 1),
         );
-        let output = graph.run(Frame::Video(rgb2(6, 8, &[(0, 0, 0); 48]))).unwrap();
-        let Frame::Video(output) = output else { panic!("expected video frame") };
+        let output = graph
+            .run(Frame::Video(rgb2(6, 8, &[(0, 0, 0); 48])))
+            .unwrap();
+        let Frame::Video(output) = output else {
+            panic!("expected video frame")
+        };
         let p = output.plane(0).unwrap();
         assert_eq!(&p[5 * 3..5 * 3 + 3], &[0, 0, 255]);
         assert!(p.chunks_exact(3).any(|pixel| pixel == [255, 255, 255]));

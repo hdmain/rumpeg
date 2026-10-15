@@ -1,6 +1,7 @@
 //! Demuxer trait and input format context.
 
 use crate::h264raw::H264RawDemuxer;
+use crate::hevcraw::HevcRawDemuxer;
 use crate::image2::Image2Demuxer;
 use crate::io::{IoReader, MediaIo};
 use crate::matroska::MatroskaDemuxer;
@@ -51,6 +52,7 @@ impl FormatContext {
             "matroska" | "webm" => Box::new(MatroskaDemuxer::open(&mut io)?),
             "mpegts" | "ts" => Box::new(MpegTsDemuxer::open(&mut io)?),
             "image2" => Box::new(Image2Demuxer::open(&mut io)?),
+            "hevc" => Box::new(HevcRawDemuxer::open(&mut io)?),
             "h264" => Box::new(H264RawDemuxer::open(&mut io)?),
             other => {
                 return Err(Error::unsupported(format!(

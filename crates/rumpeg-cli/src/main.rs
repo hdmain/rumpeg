@@ -59,7 +59,7 @@ enum Commands {
         /// Codec name (`copy` remuxes without re-encode when possible).
         #[arg(short = 'c')]
         codec: Option<String>,
-        /// Video codec name (`h264`, `libx264`, `h264_nvenc`, `native`, `mjpeg`, …).
+        /// Video codec name (`hevc`, `h265`, `h264`, `libx264`, `h264_nvenc`, `native`, `mjpeg`, …).
         #[arg(long = "c:v")]
         codec_video: Option<String>,
         /// Audio codec name.
@@ -74,13 +74,13 @@ enum Commands {
         /// Audio bitrate (e.g. `128k`). Used when muxing AAC into MP4.
         #[arg(long = "b:a")]
         bit_rate_audio: Option<String>,
-        /// CRF-like quality for H.264 (0=best … 51=worst); mapped to QP.
+        /// CRF-like quality for H.264 / HEVC (0=best … 51=worst); mapped to QP.
         #[arg(long = "crf")]
         crf: Option<f32>,
-        /// Explicit H.264 quantizer (0..=51). Overrides `--crf` / `-b:v` when set.
+        /// Explicit video quantizer (0..=51). Overrides `--crf` / `-b:v` when set.
         #[arg(long = "qp")]
         qp: Option<i32>,
-        /// GOP size / IDR interval for H.264 (default 30; `1` = all Intra).
+        /// GOP size / IDR interval for H.264 / HEVC (default 30; `1` = all Intra).
         #[arg(long = "gop")]
         gop: Option<u32>,
         /// Faster re-encode: `scale=640:-2` + `-b:v 800k` (unless already set).
@@ -98,7 +98,13 @@ enum Commands {
 
 fn main() -> ExitCode {
     rumpeg::init();
-    let cli = Cli::parse();
+    let args = std::env::args_os().map(|arg| match arg.to_str() {
+        Some("-c:v" | "-c:a" | "-b:v" | "-b:a" | "-q:v") => {
+            std::ffi::OsString::from(format!("-{}", arg.to_string_lossy()))
+        }
+        _ => arg,
+    });
+    let cli = Cli::parse_from(args);
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -164,10 +170,12 @@ fn run(cli: Cli) -> Result<()> {
             println!("  matroska / webm");
             println!("  mpegts");
             println!("  h264");
+            println!("  hevc");
             println!("  image2 (jpg/jpeg/png)");
             println!("Muxers:");
             println!("  wav");
             println!("  mp4");
+            println!("  hevc");
             println!("  image2 (jpg/jpeg/png)");
             Ok(())
         }
@@ -242,29 +250,109 @@ fn parse_overlay(spec: &str) -> Result<rumpeg::filter::OverlayElement> {
     use rumpeg::filter::OverlayElement;
     let mut fields = std::collections::HashMap::new();
     for field in spec.split(';') {
-        let (key, value) = field.split_once('=').ok_or_else(|| Error::invalid_data("overlay fields must use key=value separated by ';'"))?;
+        let (key, value) = field.split_once('=').ok_or_else(|| {
+            Error::invalid_data("overlay fields must use key=value separated by ';'")
+        })?;
         fields.insert(key.trim(), value.trim());
     }
-    let get = |key: &str| fields.get(key).copied().ok_or_else(|| Error::invalid_data(format!("overlay missing '{key}'")));
-    let number = |key: &str| -> Result<i32> { get(key)?.parse().map_err(|_| Error::invalid_data(format!("invalid overlay {key}"))) };
-    let optional_seconds = |key: &str| -> Result<Option<f64>> { fields.get(key).map(|v| v.parse().map_err(|_| Error::invalid_data(format!("invalid overlay {key}")))).transpose() };
+    let get = |key: &str| {
+        fields
+            .get(key)
+            .copied()
+            .ok_or_else(|| Error::invalid_data(format!("overlay missing '{key}'")))
+    };
+    let number = |key: &str| -> Result<i32> {
+        get(key)?
+            .parse()
+            .map_err(|_| Error::invalid_data(format!("invalid overlay {key}")))
+    };
+    let optional_seconds = |key: &str| -> Result<Option<f64>> {
+        fields
+            .get(key)
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| Error::invalid_data(format!("invalid overlay {key}")))
+            })
+            .transpose()
+    };
     let color = || -> Result<[u8; 4]> {
         let raw = get("color")?.trim_start_matches('#');
-        if raw.len() != 6 && raw.len() != 8 { return Err(Error::invalid_data("overlay color must be #RRGGBB or #RRGGBBAA")); }
+        if raw.len() != 6 && raw.len() != 8 {
+            return Err(Error::invalid_data(
+                "overlay color must be #RRGGBB or #RRGGBBAA",
+            ));
+        }
         let mut c = [0, 0, 0, 255];
-        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() { c[i] = u8::from_str_radix(std::str::from_utf8(chunk).map_err(|_| Error::invalid_data("invalid overlay color"))?, 16).map_err(|_| Error::invalid_data("invalid overlay color"))?; }
+        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+            c[i] = u8::from_str_radix(
+                std::str::from_utf8(chunk)
+                    .map_err(|_| Error::invalid_data("invalid overlay color"))?,
+                16,
+            )
+            .map_err(|_| Error::invalid_data("invalid overlay color"))?;
+        }
         Ok(c)
     };
-    let x = number("x")?; let y = number("y")?;
-    let from = optional_seconds("from")?; let to = optional_seconds("to")?;
-    if from.is_some_and(|v| !v.is_finite() || v < 0.0) || to.is_some_and(|v| !v.is_finite() || v < 0.0) || matches!((from,to),(Some(a),Some(b)) if b <= a) {
-        return Err(Error::invalid_data("overlay time range must be non-negative and end after start"));
+    let x = number("x")?;
+    let y = number("y")?;
+    let from = optional_seconds("from")?;
+    let to = optional_seconds("to")?;
+    if from.is_some_and(|v| !v.is_finite() || v < 0.0)
+        || to.is_some_and(|v| !v.is_finite() || v < 0.0)
+        || matches!((from,to),(Some(a),Some(b)) if b <= a)
+    {
+        return Err(Error::invalid_data(
+            "overlay time range must be non-negative and end after start",
+        ));
     }
     match get("kind")? {
-        "image" => OverlayElement::image_file(get("path")?, x, y, from, to, fields.get("opacity").map(|s| s.parse::<u8>().map_err(|_| Error::invalid_data("invalid overlay opacity"))).transpose()?.unwrap_or(255)),
-        "text" => Ok(OverlayElement::text(get("text")?, x, y, color()?, fields.get("scale").map(|s| s.parse::<u32>().map_err(|_| Error::invalid_data("invalid text scale"))).transpose()?.unwrap_or(1), from, to)),
-        "rect" => Ok(OverlayElement::rectangle(x, y, get("width")?.parse().map_err(|_| Error::invalid_data("invalid rectangle width"))?, get("height")?.parse().map_err(|_| Error::invalid_data("invalid rectangle height"))?, color()?, from, to)),
-        _ => Err(Error::invalid_data("overlay kind must be image, text, or rect")),
+        "image" => OverlayElement::image_file(
+            get("path")?,
+            x,
+            y,
+            from,
+            to,
+            fields
+                .get("opacity")
+                .map(|s| {
+                    s.parse::<u8>()
+                        .map_err(|_| Error::invalid_data("invalid overlay opacity"))
+                })
+                .transpose()?
+                .unwrap_or(255),
+        ),
+        "text" => Ok(OverlayElement::text(
+            get("text")?,
+            x,
+            y,
+            color()?,
+            fields
+                .get("scale")
+                .map(|s| {
+                    s.parse::<u32>()
+                        .map_err(|_| Error::invalid_data("invalid text scale"))
+                })
+                .transpose()?
+                .unwrap_or(1),
+            from,
+            to,
+        )),
+        "rect" => Ok(OverlayElement::rectangle(
+            x,
+            y,
+            get("width")?
+                .parse()
+                .map_err(|_| Error::invalid_data("invalid rectangle width"))?,
+            get("height")?
+                .parse()
+                .map_err(|_| Error::invalid_data("invalid rectangle height"))?,
+            color()?,
+            from,
+            to,
+        )),
+        _ => Err(Error::invalid_data(
+            "overlay kind must be image, text, or rect",
+        )),
     }
 }
 
@@ -359,7 +447,7 @@ fn cmd_convert(
         || codec_video.is_some_and(|c| {
             matches!(
                 c.to_ascii_lowercase().as_str(),
-                "h264" | "libx264" | "h264_nvenc" | "nvenc" | "native" | "x264"
+                "hevc" | "h265" | "h264" | "libx264" | "h264_nvenc" | "nvenc" | "native" | "x264"
             )
         });
 
@@ -506,6 +594,15 @@ fn parse_scale_from_vf(vf: &str, src_w: u32, src_h: u32) -> Option<(u32, u32)> {
     None
 }
 
+fn prepare_video_frame(frame: Frame, target: Option<&VideoParams>) -> Result<Frame> {
+    match (frame, target) {
+        (Frame::Video(v), Some(t)) if v.format != t.pix_fmt => {
+            Ok(Frame::Video(scale::convert_frame(&v, t.pix_fmt)?))
+        }
+        (frame, _) => Ok(frame),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_convert_video(
     input: &PathBuf,
@@ -524,7 +621,7 @@ fn try_convert_video(
     overlays: &[String],
 ) -> Result<()> {
     let mut demuxer = format::open_input(input)?;
-    let in_stream = stream_from_map(&demuxer, map, MediaType::Video)?.clone();
+    let mut in_stream = stream_from_map(&demuxer, map, MediaType::Video)?.clone();
     if in_stream.media_type != MediaType::Video {
         return Err(Error::invalid_data("-map must select a video stream"));
     }
@@ -544,6 +641,35 @@ fn try_convert_video(
 
     let still_codec = still_image_codec(output);
     let max_frames = frames.unwrap_or(if still_codec.is_some() { 1 } else { u64::MAX });
+
+    if in_stream
+        .codec_params
+        .video()
+        .is_some_and(|v| v.width == 0 || v.height == 0)
+    {
+        // Raw / transport streams discover geometry only when a picture is decoded.
+        let mut probe_input = format::open_input(input)?;
+        let mut probe_decoder = codec::open_decoder(&in_stream.codec_params)?;
+        let first = loop {
+            match probe_input.read_packet() {
+                Ok(p) if p.stream_index == in_stream.index => probe_decoder.send_packet(&p)?,
+                Ok(_) => continue,
+                Err(Error::Eof) => probe_decoder.send_eof()?,
+                Err(e) => return Err(e),
+            }
+            match probe_decoder.receive_frame() {
+                Ok(Frame::Video(v)) => break v,
+                Ok(_) => continue,
+                Err(Error::NeedMoreData | Error::TryAgain) => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        if let Some(v) = in_stream.codec_params.video_mut() {
+            v.width = first.width;
+            v.height = first.height;
+            v.pix_fmt = first.format;
+        }
+    }
 
     let source_fps = in_stream
         .codec_params
@@ -582,7 +708,7 @@ fn try_convert_video(
         )
     } else if let Some(name) = codec_name.filter(|c| !is_copy_codec(c)) {
         let mut video = in_stream.codec_params.video().cloned().unwrap_or_default();
-        if parse_video_codec_name(name)? == CodecId::H264 {
+        if matches!(parse_video_codec_name(name)?, CodecId::H264 | CodecId::Hevc) {
             video.pix_fmt = PixelFormat::Yuv420p;
         }
         let mut p = CodecParams::video_codec(parse_video_codec_name(name)?, video);
@@ -590,7 +716,13 @@ fn try_convert_video(
         p
     } else {
         let mut video = in_stream.codec_params.video().cloned().unwrap_or_default();
-        let codec_id = if is_mp4_output(output)
+        let raw_hevc = matches!(
+            output.extension().and_then(|e| e.to_str()),
+            Some("hevc" | "h265" | "265")
+        );
+        let codec_id = if raw_hevc {
+            CodecId::Hevc
+        } else if is_mp4_output(output)
             || matches!(
                 output
                     .extension()
@@ -598,12 +730,13 @@ fn try_convert_video(
                     .map(|e| e.to_ascii_lowercase())
                     .as_deref(),
                 Some("h264") | Some("264")
-            ) {
+            )
+        {
             CodecId::H264
         } else {
             in_stream.codec_params.codec_id
         };
-        if codec_id == CodecId::H264 {
+        if matches!(codec_id, CodecId::H264 | CodecId::Hevc) {
             video.pix_fmt = PixelFormat::Yuv420p;
         }
         CodecParams::video_codec(codec_id, video)
@@ -653,12 +786,15 @@ fn try_convert_video(
     let mut encoder = codec::open_encoder(&out_params)?;
     // Prefer avcC produced by the real encoder backend (rusty_h264 / x264 / NVENC).
     out_params.extradata = encoder.params().extradata.clone();
-    let format_hint = if still_codec.is_some() {
+    let format_hint = if still_codec == Some(CodecId::Png) {
+        Some("png")
+    } else if still_codec.is_some() {
         Some("image2")
     } else {
         None
     };
     let mut muxer = format::open_output(output, format_hint)?;
+    let target_video = out_params.video().cloned();
     let out_v = muxer.add_stream(out_params)?;
 
     let mut audio_encoder = None;
@@ -695,6 +831,7 @@ fn try_convert_video(
             }
             for frame in decoder.decode(&packet)? {
                 for frame in graph.run_all(frame)? {
+                    let frame = prepare_video_frame(frame, target_video.as_ref())?;
                     for mut pkt in encoder.encode(&frame)? {
                         pkt.stream_index = out_v;
                         muxer.write_packet(&pkt)?;
@@ -727,6 +864,7 @@ fn try_convert_video(
         match decoder.receive_frame() {
             Ok(frame) => {
                 for frame in graph.run_all(frame)? {
+                    let frame = prepare_video_frame(frame, target_video.as_ref())?;
                     for mut pkt in encoder.encode(&frame)? {
                         pkt.stream_index = out_v;
                         muxer.write_packet(&pkt)?;
@@ -946,6 +1084,7 @@ fn parse_bit_rate(s: &str) -> Result<u64> {
 
 fn parse_video_codec_name(name: &str) -> Result<CodecId> {
     match name.to_ascii_lowercase().as_str() {
+        "hevc" | "h265" => Ok(CodecId::Hevc),
         "h264" | "libx264" | "x264" | "h264_nvenc" | "nvenc" | "native" | "rumpeg" | "avc" => {
             Ok(CodecId::H264)
         }
@@ -1022,7 +1161,10 @@ fn output_supports_copy(media: MediaType, path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
     match media {
-        MediaType::Video => matches!(ext.as_deref(), Some("mp4") | Some("mov")),
+        MediaType::Video => matches!(
+            ext.as_deref(),
+            Some("mp4" | "mov" | "hevc" | "h265" | "265")
+        ),
         MediaType::Audio => matches!(ext.as_deref(), Some("wav")),
         _ => false,
     }

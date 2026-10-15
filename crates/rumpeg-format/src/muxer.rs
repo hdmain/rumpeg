@@ -1,5 +1,6 @@
 //! Muxer trait and output format context.
 
+use crate::hevcraw::HevcRawMuxer;
 use crate::image2::Image2Muxer;
 use crate::io::{IoWriter, MediaIo};
 use crate::mp4::Mp4Muxer;
@@ -56,6 +57,7 @@ impl OutputContext {
     /// Open with an existing writer.
     pub fn open_io(io: MediaIo, format_name: &str) -> Result<Self> {
         let muxer: Box<dyn Muxer> = match format_name {
+            "hevc" | "h265" | "265" => Box::new(HevcRawMuxer::default()),
             "wav" => Box::new(WavMuxer::new()),
             "mp4" | "m4v" | "mov" => Box::new(Mp4Muxer::new()),
             "jpg" | "jpeg" | "image2" => Box::new(Image2Muxer::with_codec(CodecId::Mjpeg)),

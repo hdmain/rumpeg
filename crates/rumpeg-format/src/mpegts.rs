@@ -14,6 +14,7 @@ const TS_PACKET_SIZE: usize = 188;
 const TS_SYNC: u8 = 0x47;
 
 const STREAM_TYPE_H264: u8 = 0x1B;
+const STREAM_TYPE_HEVC: u8 = 0x24;
 const STREAM_TYPE_AAC: u8 = 0x0F;
 const STREAM_TYPE_PRIVATE: u8 = 0x06;
 
@@ -132,7 +133,14 @@ fn demux_ts(data: &[u8]) -> Result<(Vec<Stream>, Vec<PesPacket>)> {
         .map(|(i, es)| (es.pid, i))
         .collect();
 
-    let pes_packets = reassemble_pes(data, &pid_to_index)?;
+    let mut pes_packets = reassemble_pes(data, &pid_to_index)?;
+    for packet in &mut pes_packets {
+        if streams[packet.stream_index].codec_params.codec_id == CodecId::Hevc {
+            packet.is_key = rumpeg_h264::extract_annexb_nals(&packet.data)
+                .iter()
+                .any(|n| n.len() >= 2 && matches!((n[0] >> 1) & 63, 16..=23));
+        }
+    }
     if pes_packets.is_empty() {
         return Err(Error::invalid_data("mpegts: no PES payloads"));
     }
@@ -147,8 +155,12 @@ fn validate_sync(data: &[u8]) -> bool {
 
 fn es_to_codec_params(stream_type: u8) -> Result<CodecParams> {
     Ok(match stream_type {
-        STREAM_TYPE_H264 => CodecParams::video_codec(
-            CodecId::H264,
+        STREAM_TYPE_H264 | STREAM_TYPE_HEVC => CodecParams::video_codec(
+            if stream_type == STREAM_TYPE_HEVC {
+                CodecId::Hevc
+            } else {
+                CodecId::H264
+            },
             VideoParams {
                 pix_fmt: PixelFormat::Yuv420p,
                 width: 0,
@@ -251,7 +263,7 @@ fn parse_pmt_section(section: &[u8]) -> Option<Vec<ElementaryStream>> {
         i += 5 + es_info_length;
         if matches!(
             stream_type,
-            STREAM_TYPE_H264 | STREAM_TYPE_AAC | STREAM_TYPE_PRIVATE
+            STREAM_TYPE_H264 | STREAM_TYPE_HEVC | STREAM_TYPE_AAC | STREAM_TYPE_PRIVATE
         ) {
             out.push(ElementaryStream {
                 pid: elementary_pid,
@@ -541,6 +553,15 @@ mod tests {
 
     #[test]
     fn demux_minimal_h264_ts() {
+        check_video_ts(STREAM_TYPE_H264, CodecId::H264);
+    }
+
+    #[test]
+    fn demux_minimal_hevc_ts() {
+        check_video_ts(STREAM_TYPE_HEVC, CodecId::Hevc);
+    }
+
+    fn check_video_ts(stream_type: u8, codec_id: CodecId) {
         let pmt_pid: u16 = 0x1000;
         let video_pid: u16 = 0x0100;
         let mut pat = vec![0u8; 16];
@@ -564,14 +585,18 @@ mod tests {
         pmt[9] = (video_pid & 0xFF) as u8;
         pmt[10] = 0xF0;
         pmt[11] = 0x00;
-        pmt[12] = STREAM_TYPE_H264;
+        pmt[12] = stream_type;
         pmt[13] = 0xE0 | ((video_pid >> 8) as u8 & 0x1F);
         pmt[14] = (video_pid & 0xFF) as u8;
         pmt[15] = 0xF0;
         pmt[16] = 0x00;
         let pmt = crc8_section(pmt);
 
-        let nal = vec![0, 0, 0, 1, 0x65, 0x88, 0x84];
+        let nal = if codec_id == CodecId::Hevc {
+            vec![0, 0, 0, 1, 0x26, 1, 0x80]
+        } else {
+            vec![0, 0, 0, 1, 0x65, 0x88, 0x84]
+        };
         let payload_len = nal.len() + 2;
         let mut pes = vec![0, 0, 1, 0xE0];
         pes.push((payload_len >> 8) as u8);
@@ -587,7 +612,8 @@ mod tests {
 
         let (streams, packets) = demux_ts(&ts).expect("demux");
         assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].codec_params.codec_id, CodecId::H264);
+        assert_eq!(streams[0].codec_params.codec_id, codec_id);
+        assert!(packets[0].is_key);
         assert_eq!(packets.len(), 1);
         assert!(packets[0].data.windows(4).any(|w| w == [0, 0, 0, 1]));
 

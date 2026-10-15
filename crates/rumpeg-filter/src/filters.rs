@@ -1251,22 +1251,73 @@ pub enum OverlayElement {
 
 impl OverlayElement {
     /// Load an image overlay from a file. The image is decoded once when this is called.
-    pub fn image_file(path: impl AsRef<std::path::Path>, x: i32, y: i32, start: Option<f64>, end: Option<f64>, opacity: u8) -> Result<Self> {
-        let rgba = image::open(path).map_err(|e| Error::invalid_data(format!("cannot read overlay image: {e}")))?.to_rgba8();
+    pub fn image_file(
+        path: impl AsRef<std::path::Path>,
+        x: i32,
+        y: i32,
+        start: Option<f64>,
+        end: Option<f64>,
+        opacity: u8,
+    ) -> Result<Self> {
+        let rgba = image::open(path)
+            .map_err(|e| Error::invalid_data(format!("cannot read overlay image: {e}")))?
+            .to_rgba8();
         let (width, height) = rgba.dimensions();
         let mut frame = VideoFrame::alloc(PixelFormat::Rgba, width, height);
-        frame.plane_mut(0).ok_or_else(|| Error::invalid_data("overlay image has no pixel plane"))?.copy_from_slice(rgba.as_raw());
-        Ok(Self::Image { frame, x, y, start, end, opacity })
+        frame
+            .plane_mut(0)
+            .ok_or_else(|| Error::invalid_data("overlay image has no pixel plane"))?
+            .copy_from_slice(rgba.as_raw());
+        Ok(Self::Image {
+            frame,
+            x,
+            y,
+            start,
+            end,
+            opacity,
+        })
     }
 
     /// Make a rectangle overlay active from `start` (inclusive) to `end` (exclusive), in seconds.
-    pub fn rectangle(x: i32, y: i32, width: u32, height: u32, color: [u8; 4], start: Option<f64>, end: Option<f64>) -> Self {
-        Self::Rectangle { x, y, width, height, color, start, end }
+    pub fn rectangle(
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        color: [u8; 4],
+        start: Option<f64>,
+        end: Option<f64>,
+    ) -> Self {
+        Self::Rectangle {
+            x,
+            y,
+            width,
+            height,
+            color,
+            start,
+            end,
+        }
     }
 
     /// Make a text overlay using a 5×7 bitmap font and integer pixel scale.
-    pub fn text(text: impl Into<String>, x: i32, y: i32, color: [u8; 4], scale: u32, start: Option<f64>, end: Option<f64>) -> Self {
-        Self::Text { text: text.into(), x, y, color, scale: scale.max(1), start, end }
+    pub fn text(
+        text: impl Into<String>,
+        x: i32,
+        y: i32,
+        color: [u8; 4],
+        scale: u32,
+        start: Option<f64>,
+        end: Option<f64>,
+    ) -> Self {
+        Self::Text {
+            text: text.into(),
+            x,
+            y,
+            color,
+            scale: scale.max(1),
+            start,
+            end,
+        }
     }
 }
 
@@ -1279,36 +1330,92 @@ pub struct OverlayFilter {
 impl OverlayFilter {
     /// Parse the legacy `overlay=x:y` form. Programmatic overlays are added with `Graph::add_overlay`.
     pub fn parse(args: &str) -> Result<Self> {
-        if !args.is_empty() { let mut xy = args.split(':'); let _ = xy.next().and_then(|v| v.parse::<i32>().ok()).ok_or_else(|| Error::invalid_data("overlay expects x:y"))?; let _ = xy.next().and_then(|v| v.parse::<i32>().ok()).ok_or_else(|| Error::invalid_data("overlay expects x:y"))?; }
-        Ok(Self { elements: Vec::new(), time_base: rumpeg_util::TIME_BASE })
+        if !args.is_empty() {
+            let mut xy = args.split(':');
+            let _ = xy
+                .next()
+                .and_then(|v| v.parse::<i32>().ok())
+                .ok_or_else(|| Error::invalid_data("overlay expects x:y"))?;
+            let _ = xy
+                .next()
+                .and_then(|v| v.parse::<i32>().ok())
+                .ok_or_else(|| Error::invalid_data("overlay expects x:y"))?;
+        }
+        Ok(Self {
+            elements: Vec::new(),
+            time_base: rumpeg_util::TIME_BASE,
+        })
     }
 
     /// Create an empty compositor.
-    pub fn new(time_base: rumpeg_util::Rational) -> Self { Self { elements: Vec::new(), time_base } }
+    pub fn new(time_base: rumpeg_util::Rational) -> Self {
+        Self {
+            elements: Vec::new(),
+            time_base,
+        }
+    }
 
     /// Add a visual element to the compositor.
-    pub fn push(&mut self, element: OverlayElement) { self.elements.push(element); }
+    pub fn push(&mut self, element: OverlayElement) {
+        self.elements.push(element);
+    }
 
     fn apply(&self, source: VideoFrame) -> Result<VideoFrame> {
-        if self.elements.is_empty() { return Ok(source); }
+        if self.elements.is_empty() {
+            return Ok(source);
+        }
         let seconds = source.pts.as_secs(self.time_base);
         let mut rgb = rumpeg_scale::convert_frame(&source, PixelFormat::Rgb24)?;
         for element in &self.elements {
             let (start, end) = match element {
-                OverlayElement::Image { start, end, .. } | OverlayElement::Rectangle { start, end, .. } | OverlayElement::Text { start, end, .. } => (*start, *end),
+                OverlayElement::Image { start, end, .. }
+                | OverlayElement::Rectangle { start, end, .. }
+                | OverlayElement::Text { start, end, .. } => (*start, *end),
             };
-            let active = seconds.map(|t| start.is_none_or(|s| t >= s) && end.is_none_or(|e| t < e)).unwrap_or(start.is_none() && end.is_none());
-            if !active { continue; }
+            let active = seconds
+                .map(|t| start.is_none_or(|s| t >= s) && end.is_none_or(|e| t < e))
+                .unwrap_or(start.is_none() && end.is_none());
+            if !active {
+                continue;
+            }
             match element {
-                OverlayElement::Image { frame, x, y, opacity, .. } => {
-                    let rgba = if frame.format == PixelFormat::Rgba { frame.clone() } else { rumpeg_scale::convert_frame(frame, PixelFormat::Rgba)? };
+                OverlayElement::Image {
+                    frame,
+                    x,
+                    y,
+                    opacity,
+                    ..
+                } => {
+                    let rgba = if frame.format == PixelFormat::Rgba {
+                        frame.clone()
+                    } else {
+                        rumpeg_scale::convert_frame(frame, PixelFormat::Rgba)?
+                    };
                     blend_rgba(&mut rgb, &rgba, *x, *y, *opacity);
                 }
-                OverlayElement::Rectangle { x, y, width, height, color, .. } => draw_rect(&mut rgb, *x, *y, *width, *height, *color),
-                OverlayElement::Text { text, x, y, color, scale, .. } => draw_text(&mut rgb, text, *x, *y, *color, *scale),
+                OverlayElement::Rectangle {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => draw_rect(&mut rgb, *x, *y, *width, *height, *color),
+                OverlayElement::Text {
+                    text,
+                    x,
+                    y,
+                    color,
+                    scale,
+                    ..
+                } => draw_text(&mut rgb, text, *x, *y, *color, *scale),
             }
         }
-        if source.format == PixelFormat::Rgb24 { Ok(rgb) } else { rumpeg_scale::convert_frame(&rgb, source.format) }
+        if source.format == PixelFormat::Rgb24 {
+            Ok(rgb)
+        } else {
+            rumpeg_scale::convert_frame(&rgb, source.format)
+        }
     }
 }
 
@@ -1318,42 +1425,126 @@ impl Filter for OverlayFilter {
     }
 
     fn filter(&mut self, frame: Frame) -> Result<Vec<Frame>> {
-        match frame { Frame::Video(v) => Ok(vec![Frame::Video(self.apply(v)?)]), other => Ok(vec![other]) }
+        match frame {
+            Frame::Video(v) => Ok(vec![Frame::Video(self.apply(v)?)]),
+            other => Ok(vec![other]),
+        }
     }
 }
 
 fn blend_rgba(dst: &mut VideoFrame, src: &VideoFrame, x: i32, y: i32, opacity: u8) {
-    let Some(sp) = src.plane(0) else { return; };
+    let Some(sp) = src.plane(0) else {
+        return;
+    };
     let dst_width = dst.width as i32;
     let dst_height = dst.height as i32;
     let ds = dst.strides[0];
-    let Some(dp) = dst.plane_mut(0) else { return; };
-    for sy in 0..src.height as i32 { for sx in 0..src.width as i32 {
-        let dx = x + sx; let dy = y + sy;
-        if dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height { continue; }
-        let si = (sy as usize * src.strides[0]) + sx as usize * 4; let di = dy as usize * ds + dx as usize * 3;
-        let a = (sp[si + 3] as u16 * opacity as u16 / 255) as u8;
-        for c in 0..3 { dp[di + c] = ((sp[si + c] as u16 * a as u16 + dp[di + c] as u16 * (255 - a) as u16) / 255) as u8; }
-    }}
+    let Some(dp) = dst.plane_mut(0) else {
+        return;
+    };
+    for sy in 0..src.height as i32 {
+        for sx in 0..src.width as i32 {
+            let dx = x + sx;
+            let dy = y + sy;
+            if dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height {
+                continue;
+            }
+            let si = (sy as usize * src.strides[0]) + sx as usize * 4;
+            let di = dy as usize * ds + dx as usize * 3;
+            let a = (sp[si + 3] as u16 * opacity as u16 / 255) as u8;
+            for c in 0..3 {
+                dp[di + c] = ((sp[si + c] as u16 * a as u16 + dp[di + c] as u16 * (255 - a) as u16)
+                    / 255) as u8;
+            }
+        }
+    }
 }
 
 fn draw_rect(dst: &mut VideoFrame, x: i32, y: i32, w: u32, h: u32, color: [u8; 4]) {
-    let width = dst.width as i32; let height = dst.height as i32; let stride = dst.strides[0];
-    let Some(p) = dst.plane_mut(0) else { return; };
-    for sy in 0..h as i32 { for sx in 0..w as i32 { let dx=x+sx; let dy=y+sy; if dx<0 || dy<0 || dx>=width || dy>=height { continue; }
-        let i=dy as usize*stride+dx as usize*3; let a=color[3] as u16; for c in 0..3 { p[i+c]=((color[c] as u16*a+p[i+c] as u16*(255-a))/255) as u8; }
-    }}
+    let width = dst.width as i32;
+    let height = dst.height as i32;
+    let stride = dst.strides[0];
+    let Some(p) = dst.plane_mut(0) else {
+        return;
+    };
+    for sy in 0..h as i32 {
+        for sx in 0..w as i32 {
+            let dx = x + sx;
+            let dy = y + sy;
+            if dx < 0 || dy < 0 || dx >= width || dy >= height {
+                continue;
+            }
+            let i = dy as usize * stride + dx as usize * 3;
+            let a = color[3] as u16;
+            for c in 0..3 {
+                p[i + c] = ((color[c] as u16 * a + p[i + c] as u16 * (255 - a)) / 255) as u8;
+            }
+        }
+    }
 }
 
 fn draw_text(dst: &mut VideoFrame, text: &str, x: i32, y: i32, color: [u8; 4], scale: u32) {
-    for (ci, ch) in text.chars().enumerate() { let glyph = glyph5x7(ch.to_ascii_uppercase());
-        for (gy, row) in glyph.iter().enumerate() { for gx in 0..5 { if row & (1 << (4-gx)) != 0 { draw_rect(dst, x + (ci as i32 * 6 + gx as i32) * scale as i32, y + gy as i32 * scale as i32, scale, scale, color); } }}
+    for (ci, ch) in text.chars().enumerate() {
+        let glyph = glyph5x7(ch.to_ascii_uppercase());
+        for (gy, row) in glyph.iter().enumerate() {
+            for gx in 0..5 {
+                if row & (1 << (4 - gx)) != 0 {
+                    draw_rect(
+                        dst,
+                        x + (ci as i32 * 6 + gx) * scale as i32,
+                        y + gy as i32 * scale as i32,
+                        scale,
+                        scale,
+                        color,
+                    );
+                }
+            }
+        }
     }
 }
 
 fn glyph5x7(c: char) -> [u8; 7] {
     match c {
-        'A'=>[14,17,17,31,17,17,17], 'B'=>[30,17,17,30,17,17,30], 'C'=>[14,17,16,16,16,17,14], 'D'=>[30,17,17,17,17,17,30], 'E'=>[31,16,16,30,16,16,31], 'F'=>[31,16,16,30,16,16,16], 'G'=>[14,17,16,23,17,17,15], 'H'=>[17,17,17,31,17,17,17], 'I'=>[14,4,4,4,4,4,14], 'J'=>[7,2,2,2,18,18,12], 'K'=>[17,18,20,24,20,18,17], 'L'=>[16,16,16,16,16,16,31], 'M'=>[17,27,21,21,17,17,17], 'N'=>[17,25,21,19,17,17,17], 'O'=>[14,17,17,17,17,17,14], 'P'=>[30,17,17,30,16,16,16], 'Q'=>[14,17,17,17,21,18,13], 'R'=>[30,17,17,30,20,18,17], 'S'=>[15,16,16,14,1,1,30], 'T'=>[31,4,4,4,4,4,4], 'U'=>[17,17,17,17,17,17,14], 'V'=>[17,17,17,17,17,10,4], 'W'=>[17,17,17,21,21,21,10], 'X'=>[17,17,10,4,10,17,17], 'Y'=>[17,17,10,4,4,4,4], 'Z'=>[31,1,2,4,8,16,31],
-        '0'=>[14,17,19,21,25,17,14], '1'=>[4,12,4,4,4,4,14], '2'=>[14,17,1,2,4,8,31], '3'=>[30,1,1,14,1,1,30], '4'=>[2,6,10,18,31,2,2], '5'=>[31,16,16,30,1,1,30], '6'=>[14,16,16,30,17,17,14], '7'=>[31,1,2,4,8,8,8], '8'=>[14,17,17,14,17,17,14], '9'=>[14,17,17,15,1,1,14], '-' => [0,0,0,31,0,0,0], ':' => [0,4,4,0,4,4,0], '.' => [0,0,0,0,0,12,12], ' ' => [0;7], _=>[14,17,1,2,4,0,4]
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [14, 17, 16, 23, 17, 17, 15],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'I' => [14, 4, 4, 4, 4, 4, 14],
+        'J' => [7, 2, 2, 2, 18, 18, 12],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 21, 19, 17, 17, 17],
+        'O' => [14, 17, 17, 17, 17, 17, 14],
+        'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
+        'T' => [31, 4, 4, 4, 4, 4, 4],
+        'U' => [17, 17, 17, 17, 17, 17, 14],
+        'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
+        'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
+        '0' => [14, 17, 19, 21, 25, 17, 14],
+        '1' => [4, 12, 4, 4, 4, 4, 14],
+        '2' => [14, 17, 1, 2, 4, 8, 31],
+        '3' => [30, 1, 1, 14, 1, 1, 30],
+        '4' => [2, 6, 10, 18, 31, 2, 2],
+        '5' => [31, 16, 16, 30, 1, 1, 30],
+        '6' => [14, 16, 16, 30, 17, 17, 14],
+        '7' => [31, 1, 2, 4, 8, 8, 8],
+        '8' => [14, 17, 17, 14, 17, 17, 14],
+        '9' => [14, 17, 17, 15, 1, 1, 14],
+        '-' => [0, 0, 0, 31, 0, 0, 0],
+        ':' => [0, 4, 4, 0, 4, 4, 0],
+        '.' => [0, 0, 0, 0, 0, 12, 12],
+        ' ' => [0; 7],
+        _ => [14, 17, 1, 2, 4, 0, 4],
     }
 }

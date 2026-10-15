@@ -9,6 +9,7 @@
 pub mod buffer;
 pub mod error;
 pub mod frame;
+pub mod hevc;
 pub mod media;
 pub mod packet;
 pub mod rational;

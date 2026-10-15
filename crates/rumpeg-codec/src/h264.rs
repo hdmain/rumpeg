@@ -179,8 +179,7 @@ fn video_frame_to_rusty(frame: &VideoFrame) -> Result<rusty_h264_common::YuvFram
         for row in 0..yuv.height as usize {
             let src = row * yuv.width as usize;
             let dst = row * w;
-            y[dst..dst + yuv.width as usize]
-                .copy_from_slice(&yuv.y[src..src + yuv.width as usize]);
+            y[dst..dst + yuv.width as usize].copy_from_slice(&yuv.y[src..src + yuv.width as usize]);
         }
         let cw = yuv.width as usize / 2;
         let ch = yuv.height as usize / 2;
@@ -219,7 +218,11 @@ fn rusty_preset(name: &str) -> rusty_h264_encoder::Preset {
     }
 }
 
-fn build_rusty_config(params: &CodecParams, width: usize, height: usize) -> rusty_h264_encoder::EncoderConfig {
+fn build_rusty_config(
+    params: &CodecParams,
+    width: usize,
+    height: usize,
+) -> rusty_h264_encoder::EncoderConfig {
     let mut cfg = rusty_h264_encoder::EncoderConfig::new(width, height);
     // Streaming convert path: one AU per input frame (no lookahead delay).
     cfg.lookahead = 0;
@@ -327,11 +330,11 @@ impl Decoder for H264Decoder {
 
 enum Backend {
     Rusty {
-        enc: rusty_h264_encoder::Encoder,
+        enc: Box<rusty_h264_encoder::Encoder>,
         pending_pts: VecDeque<Timestamp>,
     },
     Native {
-        enc: rumpeg_h264::Encoder,
+        enc: Box<rumpeg_h264::Encoder>,
     },
     #[cfg(feature = "encode-x264")]
     X264(h264_x264::X264Backend),
@@ -381,7 +384,7 @@ impl H264Encoder {
         }
         let avcc = enc.avcc_extradata().map_err(map_h264)?;
         Ok(Self {
-            backend: Backend::Native { enc },
+            backend: Backend::Native { enc: Box::new(enc) },
             pending: VecDeque::new(),
             avcc,
             eof: false,
@@ -409,7 +412,7 @@ impl H264Encoder {
             .map_err(|e| Error::invalid_data(format!("rusty_h264 open: {e}")))?;
         Ok(Self {
             backend: Backend::Rusty {
-                enc,
+                enc: Box::new(enc),
                 pending_pts: VecDeque::new(),
             },
             pending: VecDeque::new(),
@@ -494,10 +497,7 @@ impl Encoder for H264Encoder {
             self.eof = true;
             let mut flushed_packets: Vec<(Vec<u8>, Timestamp, bool)> = Vec::new();
             match &mut self.backend {
-                Backend::Rusty {
-                    enc,
-                    pending_pts,
-                } => {
+                Backend::Rusty { enc, pending_pts } => {
                     let flushed = enc.flush();
                     let pts = pending_pts.pop_front().unwrap_or(Timestamp::NONE);
                     pending_pts.clear();
@@ -534,10 +534,7 @@ impl Encoder for H264Encoder {
         };
 
         match &mut self.backend {
-            Backend::Rusty {
-                enc,
-                pending_pts,
-            } => {
+            Backend::Rusty { enc, pending_pts } => {
                 let yuv = video_frame_to_rusty(video)?;
                 pending_pts.push_back(video.pts);
                 let bytes = enc.encode(&yuv);

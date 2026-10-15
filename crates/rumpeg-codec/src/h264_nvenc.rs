@@ -9,16 +9,14 @@ use rumpeg_util::{CodecParams, CodecSpecific, Error, Result, Timestamp, VideoFra
 use nvenc::bitstream::BitStream;
 use nvenc::encoder::{Encoder as NvEncoder, RegisteredResource};
 use nvenc::session::{InitParams, Session};
-use nvenc::sys::enums::{
-    NVencBufferFormat, NVencPicStruct, NVencPicType, NVencTuningInfo,
-};
+use nvenc::sys::enums::{NVencBufferFormat, NVencPicStruct, NVencPicType, NVencTuningInfo};
 use nvenc::sys::guids::{NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P3_GUID};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION,
+    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::CreateDXGIFactory;
@@ -41,9 +39,8 @@ pub struct NvencBackend {
 unsafe impl Send for NvencBackend {}
 
 fn create_d3d11() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
-    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory =
-        unsafe { CreateDXGIFactory() }
-            .map_err(|e| Error::invalid_data(format!("DXGI factory: {e}")))?;
+    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory = unsafe { CreateDXGIFactory() }
+        .map_err(|e| Error::invalid_data(format!("DXGI factory: {e}")))?;
     let adapter = unsafe { factory.EnumAdapters(0) }
         .map_err(|e| Error::invalid_data(format!("DXGI adapter: {e}")))?;
 
@@ -167,9 +164,7 @@ impl NvencBackend {
             .get_encode_codecs()
             .map_err(|e| Error::invalid_data(format!("NVENC codecs: {e:?}")))?;
         if !codecs.iter().any(|g| g == &NV_ENC_CODEC_H264_GUID) {
-            return Err(Error::unsupported(
-                "NVENC H.264 not available on this GPU",
-            ));
+            return Err(Error::unsupported("NVENC H.264 not available on this GPU"));
         }
 
         let (session, mut config) = session
@@ -249,7 +244,12 @@ impl NvencBackend {
         video: &VideoFrame,
         pts: Timestamp,
     ) -> Result<Option<(Vec<u8>, Timestamp, bool)>> {
-        yuv420_to_argb(video, &mut self.argb, self.width as usize, self.height as usize)?;
+        yuv420_to_argb(
+            video,
+            &mut self.argb,
+            self.width as usize,
+            self.height as usize,
+        )?;
         let pitch = self.width * 4;
         unsafe {
             self.context.UpdateSubresource(

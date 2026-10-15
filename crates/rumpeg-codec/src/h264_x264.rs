@@ -24,7 +24,11 @@ impl X264Backend {
         let width = video.width.max(2) as i32;
         let height = video.height.max(2) as i32;
         let fps = video.frame_rate.as_f64();
-        let fps_num = if fps > 0.0 { fps.round().max(1.0) as u32 } else { 25 };
+        let fps_num = if fps > 0.0 {
+            fps.round().max(1.0) as u32
+        } else {
+            25
+        };
 
         let preset = match params.encode_preset.to_ascii_lowercase().as_str() {
             "ultrafast" => Preset::Ultrafast,

@@ -96,9 +96,9 @@ impl Registry {
             CodecDescriptor {
                 id: CodecId::Hevc,
                 name: "hevc",
-                long_name: "HEVC / H.265 (pure-Rust rusty_h265 decode)",
+                long_name: "HEVC / H.265 (pure-Rust decode and I/P/ABR encode)",
                 media_type: MediaType::Video,
-                kind: CodecKind::Decoder,
+                kind: CodecKind::Both,
             },
             CodecDescriptor {
                 id: CodecId::Vp9,

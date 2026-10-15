@@ -1,6 +1,6 @@
 [package]
 name = "rumpeg-codec"
-version.workspace = true
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,6 +30,7 @@ rusty_mp3 = { workspace = true }
 rusty_aac = { workspace = true }
 rusty-opus = { workspace = true }
 rusty_h265 = { workspace = true }
+oxideav-h265 = { workspace = true }
 rusty_vp9 = { workspace = true }
 rusty_h264-encoder = { workspace = true }
 rusty_h264-common = { workspace = true }

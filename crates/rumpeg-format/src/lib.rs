@@ -5,6 +5,7 @@
 
 pub mod demuxer;
 pub mod h264raw;
+pub mod hevcraw;
 pub mod image2;
 pub mod io;
 pub mod matroska;

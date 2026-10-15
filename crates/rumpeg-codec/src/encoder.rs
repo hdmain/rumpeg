@@ -3,6 +3,7 @@
 use crate::aac::AacEncoderCodec;
 use crate::flac::FlacEncoder;
 use crate::h264::H264Encoder;
+use crate::hevc::HevcEncoder;
 use crate::jpeg::JpegEncoderCodec;
 use crate::mp3::Mp3EncoderCodec;
 use crate::opus::OpusEncoderCodec;
@@ -52,6 +53,11 @@ impl EncoderContext {
                         params.extradata = extra;
                     }
                 }
+                Box::new(enc)
+            }
+            CodecId::Hevc => {
+                let enc = HevcEncoder::new(&params)?;
+                params.extradata = enc.extradata().to_vec();
                 Box::new(enc)
             }
             CodecId::Mjpeg => Box::new(JpegEncoderCodec::new(&params)?),
