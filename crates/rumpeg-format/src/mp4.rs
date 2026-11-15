@@ -124,7 +124,8 @@ fn parse_mp4(data: &[u8]) -> Result<ParsedMp4> {
         let size = cursor.read_u32::<BigEndian>()? as u64;
         let mut typ = [0u8; 4];
         cursor.read_exact(&mut typ)?;
-        let header = 8u64;
+        // Largesize boxes carry an extra u64 size field (16-byte header).
+        let header = if size == 1 { 16u64 } else { 8u64 };
         let total = if size == 1 {
             cursor.read_u64::<BigEndian>()?
         } else if size == 0 {
@@ -135,7 +136,12 @@ fn parse_mp4(data: &[u8]) -> Result<ParsedMp4> {
         if total < header {
             return Err(Error::invalid_data("bad box size"));
         }
-        let payload_end = start + total;
+        let payload_end = start
+            .checked_add(total)
+            .ok_or_else(|| Error::invalid_data("bad box size"))?;
+        if payload_end > data.len() as u64 {
+            return Err(Error::invalid_data("box extends past EOF"));
+        }
         if typ == *b"moov" {
             let payload = &data[start as usize + header as usize..payload_end as usize];
             moov = Some(payload.to_vec());
@@ -1475,5 +1481,49 @@ mod hevc_timing_tests {
         assert_eq!(parse_ctts(Some(&ctts), 2).unwrap(), vec![-2; 2]);
         assert!(parse_ctts(Some(&ctts), 1).is_err());
         assert!(parse_ctts(Some(&ctts[..15]), 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parse_bounds_tests {
+    use super::*;
+
+    fn ftyp_box() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&20u32.to_be_bytes());
+        b.extend_from_slice(b"ftyp");
+        b.extend_from_slice(b"isom");
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(b"isom");
+        b
+    }
+
+    #[test]
+    fn parse_mp4_rejects_oversized_boxes() {
+        // moov declares a 1 GiB payload but only its 8-byte header is present.
+        let mut data = ftyp_box();
+        data.extend_from_slice(&(1u32 << 30).to_be_bytes());
+        data.extend_from_slice(b"moov");
+        assert!(parse_mp4(&data).is_err());
+    }
+
+    #[test]
+    fn parse_mp4_rejects_largesize_overflow() {
+        // size == 1 (largesize) with u64::MAX total must error out instead of
+        // overflowing the offset arithmetic and slicing out of bounds.
+        let mut data = ftyp_box();
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"moov");
+        data.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(parse_mp4(&data).is_err());
+    }
+
+    #[test]
+    fn parse_mp4_rejects_largesize_shorter_than_header() {
+        let mut data = ftyp_box();
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"moov");
+        data.extend_from_slice(&4u64.to_be_bytes());
+        assert!(parse_mp4(&data).is_err());
     }
 }
