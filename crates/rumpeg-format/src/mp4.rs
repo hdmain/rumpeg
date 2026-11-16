@@ -252,6 +252,15 @@ fn track_to_stream(index: usize, track: &TrackInfo, time_base: Rational) -> Stre
     stream
 }
 
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 /// Estimate fps from media timescale and average sample duration (from CTS spacing).
 fn estimate_frame_rate(track: &TrackInfo) -> Rational {
     if track.timescale == 0 || track.samples.len() < 2 {
@@ -261,14 +270,23 @@ fn estimate_frame_rate(track: &TrackInfo) -> Rational {
     let first = track.samples.first().unwrap().dts;
     let span = (last - first).max(1) as u64;
     let n = (track.samples.len() - 1) as u64;
-    // fps ≈ n * timescale / span
-    let num = (n * u64::from(track.timescale)) as i32;
-    let den = span as i32;
-    if den <= 0 || num <= 0 {
-        Rational::new(25, 1)
-    } else {
-        Rational::new(num, den).reduce()
+    // fps ≈ n * timescale / span. Compute in u64 (n * timescale can exceed
+    // i32 for long/high-timescale tracks), reduce by GCD, then scale both sides
+    // down until they fit Rational's i32 fields instead of silently wrapping.
+    let mut num = n.saturating_mul(u64::from(track.timescale));
+    let mut den = span;
+    if num == 0 || den == 0 {
+        return Rational::new(25, 1);
     }
+    let g = gcd_u64(num, den).max(1);
+    num /= g;
+    den /= g;
+    let limit = i32::MAX as u64;
+    while num > limit || den > limit {
+        num = (num / 2).max(1);
+        den = (den / 2).max(1);
+    }
+    Rational::new(num as i32, den as i32)
 }
 
 fn parse_mvhd_timescale(payload: &[u8]) -> Result<u32> {
@@ -1061,18 +1079,24 @@ fn filter_avcc_vcl(sample: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn build_mp4_av(video: &VideoMuxState, audio: Option<&AudioMuxState>) -> Result<Vec<u8>> {
+    // This muxer writes 32-bit box sizes / chunk offsets. Refuse streams that
+    // would overflow them instead of silently wrapping into a corrupt file;
+    // largesize (64-bit) mdat support is a separate feature.
+    let too_big = || {
+        Error::invalid_data("MP4 mux: sample data exceeds 4 GiB (largesize not supported)")
+    };
     let mut mdat_payload = Vec::new();
     let mut video_sizes = Vec::new();
     for s in &video.samples {
-        video_sizes.push(s.len() as u32);
+        video_sizes.push(u32::try_from(s.len()).map_err(|_| too_big())?);
         mdat_payload.extend_from_slice(s);
     }
-    let video_chunk_size = mdat_payload.len() as u32;
+    let video_chunk_size = u32::try_from(mdat_payload.len()).map_err(|_| too_big())?;
 
     let mut audio_sizes = Vec::new();
     if let Some(a) = audio {
         for s in &a.samples {
-            audio_sizes.push(s.len() as u32);
+            audio_sizes.push(u32::try_from(s.len()).map_err(|_| too_big())?);
             mdat_payload.extend_from_slice(s);
         }
     }
@@ -1089,9 +1113,10 @@ fn build_mp4_av(video: &VideoMuxState, audio: Option<&AudioMuxState>) -> Result<
     });
 
     let mdat_header = 8u32;
-    let mdat_box_size = mdat_header + mdat_payload.len() as u32;
-    let video_offset = ftyp.len() as u32 + mdat_header;
-    let audio_offset = video_offset + video_chunk_size;
+    let mdat_box_size = u32::try_from(mdat_header as usize + mdat_payload.len())
+        .map_err(|_| too_big())?;
+    let video_offset = u32::try_from(ftyp.len() + mdat_header as usize).map_err(|_| too_big())?;
+    let audio_offset = video_offset.checked_add(video_chunk_size).ok_or_else(too_big)?;
 
     let moov = build_moov_av(
         video,
@@ -1382,7 +1407,12 @@ fn build_mp4a(sample_rate: u32, channels: u16, asc: &[u8]) -> Result<Vec<u8>> {
     body[6..8].copy_from_slice(&1u16.to_be_bytes()); // data_reference_index
     body[16..18].copy_from_slice(&channels.to_be_bytes());
     body[18..20].copy_from_slice(&16u16.to_be_bytes()); // sample_size
-    body[24..28].copy_from_slice(&(sample_rate << 16).to_be_bytes());
+    // AudioSampleEntry sample rate is a 16.16 fixed-point value: the integer
+    // part is only 16 bits. Shifting a rate >= 65536 overflowed u32 (wrapping
+    // to a wrong field); the real rate also lives in mdhd timescale, so clamp
+    // this legacy field to its maximum instead of corrupting it.
+    let rate_16_16 = sample_rate.min(u32::from(u16::MAX)) << 16;
+    body[24..28].copy_from_slice(&rate_16_16.to_be_bytes());
     body.extend_from_slice(&build_esds(asc)?);
     Ok(box_of(b"mp4a", body))
 }
@@ -1475,5 +1505,60 @@ mod hevc_timing_tests {
         assert_eq!(parse_ctts(Some(&ctts), 2).unwrap(), vec![-2; 2]);
         assert!(parse_ctts(Some(&ctts), 1).is_err());
         assert!(parse_ctts(Some(&ctts[..15]), 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    fn video_track(timescale: u32, frame_dts: i64, count: usize) -> TrackInfo {
+        let samples = (0..count)
+            .map(|i| SampleEntry {
+                stream_index: 0,
+                offset: 0,
+                size: 1,
+                cts: (i as i64) * frame_dts,
+                dts: (i as i64) * frame_dts,
+                is_key: false,
+            })
+            .collect();
+        TrackInfo {
+            kind: TrackKind::Video {
+                width: 16,
+                height: 16,
+                avcc: vec![1, 0x42, 0, 0],
+                codec_id: CodecId::H264,
+                length_size: 4,
+            },
+            timescale,
+            samples,
+        }
+    }
+
+    /// n * timescale exceeded i32 for long/high-timescale tracks; the old
+    /// `as i32` silently wrapped into a negative/garbage fps.
+    #[test]
+    fn estimate_frame_rate_large_track_no_wrap() {
+        let fps = estimate_frame_rate(&video_track(90_000, 3000, 30_000));
+        assert_eq!(fps.num, 30);
+        assert_eq!(fps.den, 1);
+    }
+
+    #[test]
+    fn gcd_u64_basic() {
+        assert_eq!(gcd_u64(270_000_000_000, 90_000_000), 90_000_000);
+        assert_eq!(gcd_u64(17, 5), 1);
+    }
+
+    /// AudioSampleEntry sample_rate is 16.16: rates >= 65536 must clamp the
+    /// integer part instead of shifting past u32.
+    #[test]
+    fn mp4a_high_sample_rate_clamps() {
+        let asc = [0x12, 0x10];
+        let bytes = build_mp4a(192_000, 2, &asc).unwrap();
+        // mp4a box body: the 16.16 field sits at box header (8) + body offset 24.
+        let field = u32::from_be_bytes(bytes[8 + 24..8 + 28].try_into().unwrap());
+        assert_eq!(field, (u16::MAX as u32) << 16);
     }
 }
