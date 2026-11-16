@@ -196,14 +196,9 @@ fn es_to_codec_params(stream_type: u8) -> Result<CodecParams> {
 }
 
 fn find_pmt_pid(data: &[u8]) -> Result<u16> {
-    for pkt in iter_ts_packets(data) {
-        if pkt.pid != 0 {
-            continue;
-        }
-        if let Some(section) = packet_payload(pkt) {
-            if let Some(pmt) = parse_pat(&section) {
-                return Ok(pmt);
-            }
+    for section in psi_sections(data, 0) {
+        if let Some(pmt) = parse_pat(&section) {
+            return Ok(pmt);
         }
     }
     Err(Error::invalid_data("mpegts: PAT not found"))
@@ -231,14 +226,9 @@ fn parse_pat(section: &[u8]) -> Option<u16> {
 }
 
 fn parse_pmt(data: &[u8], pmt_pid: u16) -> Result<Vec<ElementaryStream>> {
-    for pkt in iter_ts_packets(data) {
-        if pkt.pid != pmt_pid {
-            continue;
-        }
-        if let Some(section) = packet_payload(pkt) {
-            if let Some(list) = parse_pmt_section(&section) {
-                return Ok(list);
-            }
+    for section in psi_sections(data, pmt_pid) {
+        if let Some(list) = parse_pmt_section(&section) {
+            return Ok(list);
         }
     }
     Err(Error::invalid_data("mpegts: PMT not found"))
@@ -326,26 +316,52 @@ fn parse_ts_packet(pkt: &[u8]) -> Option<TsPacket<'_>> {
     })
 }
 
-fn packet_payload(pkt: TsPacket<'_>) -> Option<Vec<u8>> {
-    if !pkt.payload_unit_start || pkt.payload.is_empty() {
-        return None;
+/// Reassemble PSI sections (PAT/PMT) carried across one or more TS packets.
+///
+/// The first packet of a section has payload_unit_start=1 and a pointer_field;
+/// continuation packets (PUSI=0) carry raw bytes with no pointer. A section is
+/// complete once `3 + section_length` bytes have been collected. Sections that
+/// fit in one packet are handled by the same path.
+fn psi_sections(data: &[u8], pid: u16) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    let mut need = 0usize;
+
+    for pkt in iter_ts_packets(data) {
+        if pkt.pid != pid || pkt.payload.is_empty() {
+            continue;
+        }
+        let bytes: &[u8] = if pkt.payload_unit_start {
+            buf.clear();
+            need = 0;
+            let pointer = pkt.payload[0] as usize;
+            if 1 + pointer > pkt.payload.len() {
+                continue;
+            }
+            &pkt.payload[1 + pointer..]
+        } else {
+            if need == 0 {
+                continue;
+            }
+            pkt.payload
+        };
+
+        if need == 0 {
+            if bytes.len() < 3 {
+                continue;
+            }
+            need = 3 + (u16::from_be_bytes([bytes[1], bytes[2]]) as usize & 0x0FFF);
+        }
+        let take = need.saturating_sub(buf.len()).min(bytes.len());
+        if take > 0 {
+            buf.extend_from_slice(&bytes[..take]);
+        }
+        if buf.len() >= need {
+            out.push(std::mem::take(&mut buf));
+            need = 0;
+        }
     }
-    let pointer = pkt.payload[0] as usize;
-    if 1 + pointer > pkt.payload.len() {
-        return None;
-    }
-    let section = &pkt.payload[1 + pointer..];
-    if section.len() < 3 {
-        return None;
-    }
-    // Truncate stuffing bytes after the PSI section.
-    let section_length = u16::from_be_bytes([section[1], section[2]]) as usize & 0x0FFF;
-    let total = 3 + section_length;
-    if section.len() < total {
-        // Incomplete multi-packet section — not supported yet.
-        return None;
-    }
-    Some(section[..total].to_vec())
+    out
 }
 
 struct PesBuilder {
@@ -407,7 +423,10 @@ fn reassemble_pes(data: &[u8], pid_to_index: &HashMap<u16, usize>) -> Result<Vec
             completed.push(finish_pes(b));
         }
     }
-    completed.sort_by_key(|p| p.pts.unwrap_or(0));
+    // A PES without PTS must not sort to the front (timestamp 0): keep such
+    // packets at the tail in their original order instead of presenting them
+    // before every timestamped packet.
+    completed.sort_by_key(|p| p.pts.unwrap_or(i64::MAX));
     Ok(completed)
 }
 
@@ -620,5 +639,45 @@ mod tests {
         let mut cursor = Cursor::new(ts);
         let demux = MpegTsDemuxer::open(&mut cursor).expect("open");
         assert_eq!(demux.streams().len(), 1);
+    }
+
+    /// A PAT whose section spans more than one TS packet (>183 bytes) must still
+    /// yield the PMT PID. Regression for packet_payload's old "section shorter
+    /// than declared -> drop the whole PAT" behaviour.
+    #[test]
+    fn multi_packet_pat_is_reassembled() {
+        let pmt_pid: u16 = 0x1234;
+        // 8-byte header + 45 programs * 4 + 4-byte CRC = 192 bytes; the section
+        // payload exceeds a single TS packet's 183 usable bytes.
+        let mut pat = vec![0u8; 8 + 45 * 4 + 4];
+        pat[0] = 0x00; // table_id: PAT
+        pat[8] = 0x00;
+        pat[9] = 0x01; // program_number = 1 (first real program)
+        pat[10] = 0xE0 | ((pmt_pid >> 8) as u8 & 0x1F);
+        pat[11] = (pmt_pid & 0xFF) as u8;
+        let pat = crc8_section(pat);
+        assert!(pat.len() > 183);
+
+        let mut ts = Vec::new();
+        // First packet: PUSI=1, pointer_field=0, then the first 183 section bytes.
+        let mut p1 = [0xFFu8; TS_PACKET_SIZE];
+        p1[0] = TS_SYNC;
+        p1[1] = 0x40; // PUSI=1, PID 0
+        p1[2] = 0x00;
+        p1[3] = 0x10;
+        p1[4] = 0x00; // pointer_field
+        p1[5..5 + 183].copy_from_slice(&pat[..183]);
+        ts.extend_from_slice(&p1);
+        // Continuation packet: PUSI=0, remaining section bytes, rest stuffing.
+        let mut p2 = [0xFFu8; TS_PACKET_SIZE];
+        p2[0] = TS_SYNC;
+        p2[1] = 0x00; // PUSI=0, PID 0
+        p2[2] = 0x00;
+        p2[3] = 0x10;
+        let rest = &pat[183..];
+        p2[4..4 + rest.len()].copy_from_slice(rest);
+        ts.extend_from_slice(&p2);
+
+        assert_eq!(find_pmt_pid(&ts).unwrap(), pmt_pid);
     }
 }

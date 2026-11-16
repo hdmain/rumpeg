@@ -90,6 +90,12 @@ pub fn parse_header(r: &mut dyn IoReader) -> Result<WavInfo> {
 }
 
 fn parse_fmt(r: &mut dyn IoReader, chunk_size: u64) -> Result<(CodecParams, u16)> {
+    // A fmt chunk must hold at least the 16-byte PCM/WAVE_FORMAT tag. Reading
+    // unconditionally swallowed the following chunk's bytes on a truncated fmt,
+    // desynchronising the rest of the RIFF parse.
+    if chunk_size < 16 {
+        return Err(Error::invalid_data(format!("short WAVE fmt chunk: {chunk_size}")));
+    }
     let format_tag = r.read_u16::<LittleEndian>()?;
     let channels = r.read_u16::<LittleEndian>()?;
     let sample_rate = r.read_u32::<LittleEndian>()?;
@@ -370,5 +376,26 @@ impl Muxer for WavMuxer {
         writer.seek(SeekFrom::Start(end))?;
         writer.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fmt chunk shorter than the 16-byte PCM tag must be rejected, not read
+    /// past its boundary (which swallowed the next chunk's bytes).
+    #[test]
+    fn short_fmt_chunk_is_rejected() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&40u32.to_le_bytes());
+        data.extend_from_slice(b"WAVE");
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&8u32.to_le_bytes()); // declares only 8 bytes
+        data.extend_from_slice(&[0u8; 8]);
+        let mut cursor = std::io::Cursor::new(data);
+        let err = parse_header(&mut cursor).unwrap_err();
+        assert!(err.to_string().contains("short WAVE fmt"), "{err}");
     }
 }

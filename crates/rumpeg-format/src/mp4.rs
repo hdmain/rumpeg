@@ -78,11 +78,26 @@ impl Demuxer for Mp4Demuxer {
     }
 
     fn seek(&mut self, _reader: &mut dyn IoReader, timestamp: i64) -> Result<()> {
-        self.index = self
+        let landing = self
             .samples
             .iter()
             .position(|s| s.cts >= timestamp)
             .unwrap_or(0);
+        // Decode must start at a keyframe. Snap back to the nearest keyframe at
+        // or before the requested time; if none precedes it, take the next one.
+        // Tracks without any keyframe flag (e.g. audio) keep the raw landing.
+        let mut idx = landing;
+        while idx > 0 && !self.samples[idx].is_key {
+            idx -= 1;
+        }
+        if !self.samples.get(idx).map(|s| s.is_key).unwrap_or(false) {
+            if let Some(k) = self.samples[landing..].iter().position(|s| s.is_key) {
+                idx = landing + k;
+            } else {
+                idx = landing;
+            }
+        }
+        self.index = idx;
         Ok(())
     }
 }
@@ -415,7 +430,8 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             b"stsd" => stsd = Some(payload),
             b"stts" => stts = Some(payload),
             b"stsc" => stsc = Some(payload),
-            b"stsz" | b"stz2" => stsz = Some(payload),
+            b"stsz" => stsz = Some((payload, false)),
+            b"stz2" => stsz = Some((payload, true)),
             b"stco" => stco = Some(payload),
             b"co64" => co64 = Some(payload),
             b"stss" => stss = Some(payload),
@@ -426,7 +442,7 @@ fn parse_stbl_video(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
     }
     let stsd = stsd.ok_or_else(|| Error::invalid_data("missing stsd"))?;
     let (width, height, avcc, length_size, codec_id) = parse_stsd_video(stsd)?;
-    let sizes = parse_stsz(stsz.ok_or_else(|| Error::invalid_data("missing stsz"))?)?;
+    let sizes = parse_sample_sizes(stsz.ok_or_else(|| Error::invalid_data("missing stsz/stz2"))?)?;
     let chunk_offsets = if let Some(stco) = stco {
         parse_stco(stco)?
     } else if let Some(co64) = co64 {
@@ -501,7 +517,8 @@ fn parse_stbl_audio(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
             b"stsd" => stsd = Some(payload),
             b"stts" => stts = Some(payload),
             b"stsc" => stsc = Some(payload),
-            b"stsz" | b"stz2" => stsz = Some(payload),
+            b"stsz" => stsz = Some((payload, false)),
+            b"stz2" => stsz = Some((payload, true)),
             b"stco" => stco = Some(payload),
             b"co64" => co64 = Some(payload),
             _ => {}
@@ -510,7 +527,7 @@ fn parse_stbl_audio(stbl: &[u8], file: &[u8], timescale: u32) -> Result<TrackInf
     }
     let stsd = stsd.ok_or_else(|| Error::invalid_data("missing stsd"))?;
     let (sample_rate, channels, extradata) = parse_stsd_mp4a(stsd)?;
-    let sizes = parse_stsz(stsz.ok_or_else(|| Error::invalid_data("missing stsz"))?)?;
+    let sizes = parse_sample_sizes(stsz.ok_or_else(|| Error::invalid_data("missing stsz/stz2"))?)?;
     let chunk_offsets = if let Some(stco) = stco {
         parse_stco(stco)?
     } else if let Some(co64) = co64 {
@@ -730,6 +747,60 @@ fn parse_stsz(payload: &[u8]) -> Result<Vec<u32>> {
         sizes.push(u32::from_be_bytes(payload[o..o + 4].try_into().unwrap()));
     }
     Ok(sizes)
+}
+
+/// Compact sample size box (`stz2`), distinct from `stsz`: an 8-bit field
+/// size with 4/8/16-bit packed entries. Treating stz2 as stsz read the field
+/// size byte as part of a wrong header and produced bogus sample sizes.
+fn parse_stz2(payload: &[u8]) -> Result<Vec<u32>> {
+    // version/flags(4) | reserved(3) | field_size(1) | sample_count(4)
+    if payload.len() < 12 {
+        return Err(Error::invalid_data("stz2"));
+    }
+    let field_size = payload[7];
+    let count = u32::from_be_bytes(payload[8..12].try_into().unwrap()) as usize;
+    let bytes_needed = match field_size {
+        4 => count.div_ceil(2),
+        8 => count,
+        16 => count * 2,
+        _ => return Err(Error::invalid_data("stz2 field_size")),
+    };
+    if payload.len() < 12 + bytes_needed {
+        return Err(Error::invalid_data("stz2 table"));
+    }
+    let table = &payload[12..];
+    let mut sizes = Vec::with_capacity(count);
+    match field_size {
+        4 => {
+            for n in 0..count {
+                let byte = table[n / 2];
+                let v = if n % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+                sizes.push(u32::from(v));
+            }
+        }
+        8 => {
+            sizes.extend(table.iter().take(count).map(|&b| u32::from(b)));
+        }
+        16 => {
+            for n in 0..count {
+                sizes.push(u32::from(u16::from_be_bytes(
+                    table[n * 2..n * 2 + 2].try_into().unwrap(),
+                )));
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(sizes)
+}
+
+/// Parse either a full (`stsz`) or compact (`stz2`) sample size box.
+fn parse_sample_sizes(box_payload: (&[u8], bool)) -> Result<Vec<u32>> {
+    let (payload, is_stz2) = box_payload;
+    if is_stz2 {
+        parse_stz2(payload)
+    } else {
+        parse_stsz(payload)
+    }
 }
 
 fn parse_stco(payload: &[u8]) -> Result<Vec<u64>> {
@@ -1560,5 +1631,34 @@ mod overflow_tests {
         // mp4a box body: the 16.16 field sits at box header (8) + body offset 24.
         let field = u32::from_be_bytes(bytes[8 + 24..8 + 28].try_into().unwrap());
         assert_eq!(field, (u16::MAX as u32) << 16);
+    }
+
+    /// Seek into a GOP must land on the preceding keyframe, not on whichever
+    /// sample first crosses the timestamp (which would start decode mid-GOP).
+    #[test]
+    fn seek_snaps_to_keyframe() {
+        use crate::demuxer::Demuxer;
+        let samples = [0i64, 100, 200, 300, 400]
+            .into_iter()
+            .enumerate()
+            .map(|(i, cts)| SampleEntry {
+                stream_index: 0,
+                offset: 0,
+                size: 1,
+                cts,
+                dts: cts,
+                is_key: i == 0 || i == 3,
+            })
+            .collect();
+        let mut demux = Mp4Demuxer {
+            streams: Vec::new(),
+            samples,
+            index: 0,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        demux.seek(&mut cursor, 150).unwrap();
+        assert_eq!(demux.index, 0, "150ms falls in GOP started by keyframe 0");
+        demux.seek(&mut cursor, 350).unwrap();
+        assert_eq!(demux.index, 3, "350ms falls in GOP started by keyframe 3");
     }
 }
