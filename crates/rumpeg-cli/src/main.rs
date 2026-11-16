@@ -1170,6 +1170,29 @@ fn output_supports_copy(media: MediaType, path: &Path) -> bool {
     }
 }
 
+/// Build an avcC from the in-band SPS/PPS of an Annex-B elementary stream.
+/// Returns `None` when either parameter set is missing, so callers can fail
+/// loudly instead of fabricating a mismatched avcC from a fresh encoder.
+fn avcc_from_elementary_stream(data: &[u8]) -> Option<Vec<u8>> {
+    use rumpeg::h264::{extract_annexb_nals, nal_unit_type, AvcDecoderConfig, NAL_PPS, NAL_SPS};
+    let mut sps = None;
+    let mut pps = None;
+    for nal in extract_annexb_nals(data) {
+        match nal_unit_type(nal).unwrap_or(0) {
+            NAL_SPS if sps.is_none() => sps = Some(nal.to_vec()),
+            NAL_PPS if pps.is_none() => pps = Some(nal.to_vec()),
+            _ => {}
+        }
+        if sps.is_some() && pps.is_some() {
+            break;
+        }
+    }
+    let (s, p) = sps.zip(pps)?;
+    AvcDecoderConfig::from_sps_pps(&s, &p)
+        .ok()
+        .map(|cfg| cfg.to_avcc())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_remux_copy(
     input: &PathBuf,
@@ -1228,11 +1251,15 @@ fn try_remux_copy(
 
     let mut out_params = in_stream.codec_params.clone();
     if out_params.codec_id == CodecId::H264 && out_params.extradata.is_empty() {
-        if let Some(v) = out_params.video() {
-            if let Ok(enc) = rumpeg::h264::Encoder::new(v.width.max(16), v.height.max(16)) {
-                out_params.extradata = enc.avcc_extradata().unwrap_or_default();
-            }
-        }
+        // MP4 needs an avcC whose SPS/PPS match the copied bitstream. Fabricating
+        // one from a fresh Encoder embeds unrelated SPS/PPS and yields an
+        // undecodable file. Extract the real in-band SPS/PPS instead; if they
+        // are missing, fail loudly rather than emit a corrupt MP4.
+        let raw = std::fs::read(input)
+            .map_err(|e| Error::invalid_data(format!("read input for avcC: {e}")))?;
+        out_params.extradata = avcc_from_elementary_stream(&raw).ok_or_else(|| {
+            Error::invalid_data("H.264 stream copy to MP4 requires in-band SPS/PPS in the input")
+        })?;
     }
 
     let format_hint = match in_stream.media_type {
@@ -1283,4 +1310,30 @@ fn cmd_codecs() -> Result<()> {
         println!("{kind:>2} {:<12} {}", c.name, c.long_name);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The avcC built from a copied Annex-B stream must match the SPS/PPS that
+    /// are actually in that stream, not a fresh encoder's parameter sets.
+    #[test]
+    fn avcc_extracted_from_elementary_stream_matches_source() {
+        use rumpeg::h264::{Encoder, Yuv420Planar};
+
+        let mut src = Yuv420Planar::zeroed(32, 32);
+        for (i, y) in src.y.iter_mut().enumerate() {
+            *y = (i % 200) as u8 + 20;
+        }
+        let mut enc = Encoder::new(32, 32).unwrap(); // I_PCM
+        let annexb = enc.encode_annexb(&src).unwrap();
+        let expected = enc.avcc_extradata().unwrap();
+
+        let got = avcc_from_elementary_stream(&annexb).expect("SPS/PPS present");
+        assert_eq!(got, expected, "extracted avcC must match source SPS/PPS");
+
+        // A stream with no SPS/PPS must not yield a fabricated avcC.
+        assert!(avcc_from_elementary_stream(&[0, 0, 0, 1, 0x65, 0x88]).is_none());
+    }
 }
