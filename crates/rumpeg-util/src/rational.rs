@@ -70,7 +70,10 @@ impl Rational {
         if den == 0 {
             0
         } else {
-            (num / den) as i64
+            // `as i64` truncates the i128 quotient's high bits, silently
+            // wrapping extreme rescales. Saturate instead so an out-of-range
+            // timestamp never becomes a small/garbage value.
+            (num / den).clamp(i64::MIN as i128, i64::MAX as i128) as i64
         }
     }
 }
@@ -107,5 +110,14 @@ mod tests {
         let to = Rational::new(1, 1_000_000);
         // 48000 samples @ 48kHz -> 1 second -> 1_000_000 us
         assert_eq!(from.rescale(48_000, to), 1_000_000);
+    }
+
+    /// Out-of-range rescale must saturate, not wrap to a small value.
+    #[test]
+    fn rescale_saturates_instead_of_wrapping() {
+        let one = Rational::one();
+        let micro = Rational::new(1, 1_000_000);
+        assert_eq!(one.rescale(i64::MAX, micro), i64::MAX);
+        assert_eq!(one.rescale(i64::MIN, micro), i64::MIN);
     }
 }
