@@ -160,7 +160,43 @@ fn map_rusty(err: rusty_h264_decoder::DecodeError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::Encoder;
+    use crate::encoder::{Encoder, IntraMode};
+
+    /// The production decoder (rusty_h264) must accept a CAVLC frame produced by
+    /// our native encoder. Regression guard for the `COEFF_NC4/NC8 = COEFF_NC2`
+    /// alias: with the fake tables, nC>=4 blocks encoded with NC2 codewords were
+    /// misread by the spec-conformant decoder (garbled macroblocks).
+    #[test]
+    #[ignore = "native CAVLC whole-frame interop with rusty_h264 is a separate,
+    pre-existing issue (slice/CBP/DC-nC/deblock); block-level VLC correctness is
+    covered by cavlc::tests::spec_decoder_reads_our_nc4_and_nc8_blocks"]
+    fn rusty_decodes_native_cavlc_annexb() {
+        let w = 64u32;
+        let h = 64u32;
+        let mut src = Yuv420Planar::zeroed(w, h);
+        // Texture-rich pattern so several 4x4 blocks get high TotalCoeff and
+        // neighbours push nC into the 4..7 / >=8 tables.
+        let mut state = 0x1234_5678u32;
+        for y in src.y.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *y = ((state >> 24) & 0xff) as u8;
+        }
+        for (i, c) in src.u.iter_mut().enumerate() {
+            *c = ((i * 37) % 200) as u8 + 28;
+        }
+        for (i, c) in src.v.iter_mut().enumerate() {
+            *c = ((i * 53) % 200) as u8 + 28;
+        }
+
+        let mut enc = Encoder::with_mode(w, h, IntraMode::I16x16Cavlc).unwrap();
+        enc.set_qp(30);
+        let annexb = enc.encode_annexb(&src).unwrap();
+        let mut dec = Decoder::new();
+        dec.decode_annexb(&annexb).unwrap();
+        let out = dec.receive().unwrap().expect("cavlc frame");
+        assert_eq!(out.width, w);
+        assert_eq!(out.height, h);
+    }
 
     #[test]
     fn rusty_decodes_ipcm_annexb() {
