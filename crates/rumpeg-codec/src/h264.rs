@@ -181,8 +181,14 @@ fn video_frame_to_rusty(frame: &VideoFrame) -> Result<rusty_h264_common::YuvFram
             let dst = row * w;
             y[dst..dst + yuv.width as usize].copy_from_slice(&yuv.y[src..src + yuv.width as usize]);
         }
-        let cw = yuv.width as usize / 2;
-        let ch = yuv.height as usize / 2;
+        // The source chroma planes come from VideoFrame::alloc, whose stride is
+        // ceil(width/2) (see rumpeg-util frame::plane_layout), not floor. Using
+        // width/2 here shifted every row by one sample for odd widths, causing
+        // progressive chroma misalignment. `w` was rounded up via even_dim, so
+        // w/2 == ceil(width/2) == the destination row width; copying cw samples
+        // per row is contiguous on both sides.
+        let cw = (yuv.width as usize).div_ceil(2);
+        let ch = (yuv.height as usize).div_ceil(2);
         for row in 0..ch {
             let src = row * cw;
             let dst = row * (w / 2);
@@ -598,5 +604,43 @@ fn map_h264(err: rumpeg_h264::Error) -> Error {
     match err {
         rumpeg_h264::Error::Truncated(m) | rumpeg_h264::Error::Invalid(m) => Error::invalid_data(m),
         rumpeg_h264::Error::Unsupported(m) => Error::unsupported(m),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Odd-width frames must keep chroma rows aligned when padded to even
+    /// dimensions for rusty_h264. Regression for using width/2 (floor) instead
+    /// of the authoritative ceil(width/2) stride, which shifted each chroma row.
+    #[test]
+    fn video_frame_to_rusty_odd_width_chroma_aligned() {
+        let w = 5u32; // odd -> padded to 6
+        let h = 4u32;
+        let mut frame = VideoFrame::alloc(PixelFormat::Yuv420p, w, h);
+        // Distinct per-row values in U so a stride mistake is detectable.
+        let cs = frame.strides[1];
+        assert_eq!(cs, 3); // ceil(5/2)
+        let ch = h.div_ceil(2) as usize; // chroma rows = 2
+        for row in 0..ch {
+            for col in 0..cs {
+                let v = (10 * row + col + 1) as u8;
+                frame.plane_mut(1).unwrap()[row * cs + col] = v;
+                frame.plane_mut(2).unwrap()[row * cs + col] = v;
+            }
+        }
+
+        let yuv = video_frame_to_rusty(&frame).unwrap();
+        assert_eq!(yuv.width, 6);
+        assert_eq!(yuv.height, 4);
+        // Destination chroma row width is 6/2 = 3 == source ceil stride.
+        for row in 0..2 {
+            for col in 0..3 {
+                let expected = (10 * row + col + 1) as u8;
+                assert_eq!(yuv.u[row * 3 + col], expected, "U row {row} col {col}");
+                assert_eq!(yuv.v[row * 3 + col], expected, "V row {row} col {col}");
+            }
+        }
     }
 }

@@ -109,11 +109,15 @@ fn yuv420_to_argb(video: &VideoFrame, dst: &mut [u8], width: usize, height: usiz
         .ok_or_else(|| Error::invalid_data("missing V"))?;
     let src_w = video.width as usize;
     let src_h = video.height as usize;
+    // Sample using each plane's authoritative stride: Yuv420p chroma stride is
+    // ceil(width/2), so width/2 (floor) shifted chroma rows for odd widths.
+    let ys = video.strides.first().copied().unwrap_or(src_w);
+    let cs = video.strides.get(1).copied().unwrap_or(src_w.div_ceil(2));
     for row in 0..height.min(src_h) {
         for col in 0..width.min(src_w) {
-            let yi = y[row * src_w + col] as i32;
-            let ui = u[(row / 2) * (src_w / 2) + (col / 2)] as i32;
-            let vi = v[(row / 2) * (src_w / 2) + (col / 2)] as i32;
+            let yi = y[row * ys + col] as i32;
+            let ui = u[(row / 2) * cs + (col / 2)] as i32;
+            let vi = v[(row / 2) * cs + (col / 2)] as i32;
             let c = yi - 16;
             let d = ui - 128;
             let e = vi - 128;

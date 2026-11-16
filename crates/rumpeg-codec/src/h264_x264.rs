@@ -95,17 +95,22 @@ impl X264Backend {
             .plane(2)
             .ok_or_else(|| Error::invalid_data("missing V"))?;
 
+        // Use the frame's authoritative per-plane strides. Yuv420p chroma
+        // stride is ceil(width/2); width/2 (floor) shifted every chroma row for
+        // odd-width frames. Falls back to the even-coded dimensions when the
+        // stride vector is absent.
+        let cs = video.strides.get(1).copied().unwrap_or((self.width as usize + 1) / 2) as i32;
         let planes = [
             Plane {
                 stride: self.width,
                 data: y,
             },
             Plane {
-                stride: self.width / 2,
+                stride: cs,
                 data: u,
             },
             Plane {
-                stride: self.width / 2,
+                stride: cs,
                 data: v,
             },
         ];
