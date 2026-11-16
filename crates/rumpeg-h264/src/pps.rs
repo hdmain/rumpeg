@@ -40,7 +40,10 @@ impl Pps {
             weighted_pred_flag: false,
             pic_init_qp_minus26: 0,
             chroma_qp_index_offset: 0,
-            deblocking_filter_control_present_flag: false,
+            // The native encoder builds its reference frames without an in-loop
+            // deblocking filter. Signal the control flag so each slice can set
+            // disable_deblocking_filter_idc=1, keeping decoder references in sync.
+            deblocking_filter_control_present_flag: true,
             constrained_intra_pred_flag: false,
             redundant_pic_cnt_present_flag: false,
         }
