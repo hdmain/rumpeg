@@ -42,7 +42,14 @@ impl Resampler {
         }
 
         let ratio = self.src_rate as f64 / self.dst_rate as f64;
-        let out_samples = ((in_samples as f64) / ratio).floor() as usize;
+        // `phase` is the input-sample position of the next output, relative to
+        // this frame, carried over from previous frames. Emit every output
+        // whose source position falls inside this frame; using ceil (not floor)
+        // lets an output straddle a frame boundary instead of silently dropping
+        // the tail samples. With out = ceil((in - phase)/ratio), the new phase
+        // is always in [0, ratio) and no input sample is lost.
+        let out_samples = (((in_samples as f64 - self.phase) / ratio).ceil() as isize).max(0)
+            as usize;
         let mut out = vec![0.0f32; out_samples * ch];
 
         for i in 0..out_samples {
@@ -56,9 +63,12 @@ impl Resampler {
                 out[i * ch + c] = a + (b - a) * frac;
             }
         }
-        self.phase = (self.phase + out_samples as f64 * ratio) - in_samples as f64;
+        self.phase = self.phase + out_samples as f64 * ratio - in_samples as f64;
+        // Normalise against float rounding: phase must stay in [0, ratio).
         if self.phase < 0.0 {
             self.phase = 0.0;
+        } else if self.phase >= ratio {
+            self.phase -= ratio;
         }
         Ok(out)
     }
@@ -89,5 +99,44 @@ pub fn resample_frame(src: &AudioFrame, dst_rate: u32) -> Result<AudioFrame> {
         Ok(out)
     } else {
         convert_samples(&out, src.format)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feeding many frames through one stateful Resampler must preserve total
+    /// duration: sample count out ~= sample count in * dst/src, with error well
+    /// under one frame. The old floor() formula dropped the fractional tail of
+    /// every frame, so long streams progressively shrank.
+    #[test]
+    fn phase_continuity_preserves_total_samples() {
+        for &(src_rate, dst_rate) in &[(48_000u32, 44_100u32), (44_100, 48_000), (48_000, 22_050)] {
+            let mut r = Resampler::new(src_rate, dst_rate, 1).unwrap();
+            let frame_len = 1024usize;
+            let frames = 200usize;
+            let input = vec![0.5f32; frame_len];
+            let mut total_in = 0usize;
+            let mut total_out = 0usize;
+            for _ in 0..frames {
+                total_out += r.process_f32(&input).unwrap().len();
+                total_in += frame_len;
+            }
+            let expected = (total_in as f64 * dst_rate as f64 / src_rate as f64).round() as usize;
+            let diff = total_out.abs_diff(expected);
+            assert!(
+                diff <= 1,
+                "{src_rate}->{dst_rate}: expected ~{expected} samples, got {total_out} (diff {diff})"
+            );
+        }
+    }
+
+    /// Same-rate passthrough must be exact and reset phase.
+    #[test]
+    fn same_rate_is_passthrough() {
+        let mut r = Resampler::new(48_000, 48_000, 2).unwrap();
+        let input = [1.0f32, 2.0, 3.0, 4.0];
+        assert_eq!(r.process_f32(&input).unwrap(), input);
     }
 }
