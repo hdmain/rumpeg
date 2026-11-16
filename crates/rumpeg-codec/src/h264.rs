@@ -324,8 +324,7 @@ impl Decoder for H264Decoder {
             decoded.push_back(yuv);
         }
         let n = decoded.len();
-        let step = if n > 1 && !prev_pts.is_none() && !cur_pts.is_none() && cur_pts.0 > prev_pts.0
-        {
+        let step = if n > 1 && !prev_pts.is_none() && !cur_pts.is_none() && cur_pts.0 > prev_pts.0 {
             (cur_pts.0 - prev_pts.0) / n as i64
         } else {
             0
@@ -336,7 +335,8 @@ impl Decoder for H264Decoder {
             } else {
                 cur_pts
             };
-            self.pending.push_back(Frame::Video(yuv_to_video_frame(yuv, pts)));
+            self.pending
+                .push_back(Frame::Video(yuv_to_video_frame(yuv, pts)));
         }
         self.last_pts = cur_pts;
         Ok(())

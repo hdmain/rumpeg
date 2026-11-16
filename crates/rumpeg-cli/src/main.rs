@@ -1372,7 +1372,10 @@ mod tests {
             parse_scale_from_vf("scale=640:480,scale=320:240", 1920, 1080),
             Some((320, 240))
         );
-        assert_eq!(parse_scale_from_vf("fps=30,scale=128:72", 1920, 1080), Some((128, 72)));
+        assert_eq!(
+            parse_scale_from_vf("fps=30,scale=128:72", 1920, 1080),
+            Some((128, 72))
+        );
         assert_eq!(parse_scale_from_vf("fps=30", 1920, 1080), None);
     }
 }

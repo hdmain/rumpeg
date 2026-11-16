@@ -435,9 +435,7 @@ mod tests {
 
         // Blocks with enough nonzeros to exercise nC 4..7 (table 2) and >=8
         // (table 3): dense coefficients force large neighbour TotalCoeff.
-        let dense: [i32; 16] = [
-            1, -2, 3, -1, 1, 1, -1, 2, -3, 1, -1, 1, 1, -1, 1, -1,
-        ];
+        let dense: [i32; 16] = [1, -2, 3, -1, 1, 1, -1, 2, -3, 1, -1, 1, 1, -1, 1, -1];
         let sparse: [i32; 16] = [0, 0, 1, -1, 0, 2, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0];
 
         for nc in [4, 5, 7, 8, 9, 16] {
@@ -448,11 +446,11 @@ mod tests {
                 let bytes = w.into_bytes();
 
                 let mut r = RustyBitReader::new(&bytes);
-                let (out, total) =
-                    rusty_h264_common::cavlc::decode_residual_block(&mut r, 16, nc)
-                        .expect("spec decoder must accept our bitstream");
+                let (out, total) = rusty_h264_common::cavlc::decode_residual_block(&mut r, 16, nc)
+                    .expect("spec decoder must accept our bitstream");
                 assert_eq!(
-                    &out[..16], &levels[..16],
+                    &out[..16],
+                    &levels[..16],
                     "nC={nc}: spec decoder decoded different coefficients"
                 );
                 assert_eq!(total as usize, levels.iter().filter(|&&v| v != 0).count());

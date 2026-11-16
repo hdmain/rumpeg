@@ -94,7 +94,9 @@ fn parse_fmt(r: &mut dyn IoReader, chunk_size: u64) -> Result<(CodecParams, u16)
     // unconditionally swallowed the following chunk's bytes on a truncated fmt,
     // desynchronising the rest of the RIFF parse.
     if chunk_size < 16 {
-        return Err(Error::invalid_data(format!("short WAVE fmt chunk: {chunk_size}")));
+        return Err(Error::invalid_data(format!(
+            "short WAVE fmt chunk: {chunk_size}"
+        )));
     }
     let format_tag = r.read_u16::<LittleEndian>()?;
     let channels = r.read_u16::<LittleEndian>()?;

@@ -48,8 +48,8 @@ impl Resampler {
         // lets an output straddle a frame boundary instead of silently dropping
         // the tail samples. With out = ceil((in - phase)/ratio), the new phase
         // is always in [0, ratio) and no input sample is lost.
-        let out_samples = (((in_samples as f64 - self.phase) / ratio).ceil() as isize).max(0)
-            as usize;
+        let out_samples =
+            (((in_samples as f64 - self.phase) / ratio).ceil() as isize).max(0) as usize;
         let mut out = vec![0.0f32; out_samples * ch];
 
         for i in 0..out_samples {

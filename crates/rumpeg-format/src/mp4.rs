@@ -1153,9 +1153,8 @@ fn build_mp4_av(video: &VideoMuxState, audio: Option<&AudioMuxState>) -> Result<
     // This muxer writes 32-bit box sizes / chunk offsets. Refuse streams that
     // would overflow them instead of silently wrapping into a corrupt file;
     // largesize (64-bit) mdat support is a separate feature.
-    let too_big = || {
-        Error::invalid_data("MP4 mux: sample data exceeds 4 GiB (largesize not supported)")
-    };
+    let too_big =
+        || Error::invalid_data("MP4 mux: sample data exceeds 4 GiB (largesize not supported)");
     let mut mdat_payload = Vec::new();
     let mut video_sizes = Vec::new();
     for s in &video.samples {
@@ -1184,10 +1183,12 @@ fn build_mp4_av(video: &VideoMuxState, audio: Option<&AudioMuxState>) -> Result<
     });
 
     let mdat_header = 8u32;
-    let mdat_box_size = u32::try_from(mdat_header as usize + mdat_payload.len())
-        .map_err(|_| too_big())?;
+    let mdat_box_size =
+        u32::try_from(mdat_header as usize + mdat_payload.len()).map_err(|_| too_big())?;
     let video_offset = u32::try_from(ftyp.len() + mdat_header as usize).map_err(|_| too_big())?;
-    let audio_offset = video_offset.checked_add(video_chunk_size).ok_or_else(too_big)?;
+    let audio_offset = video_offset
+        .checked_add(video_chunk_size)
+        .ok_or_else(too_big)?;
 
     let moov = build_moov_av(
         video,
@@ -1478,6 +1479,7 @@ fn build_mp4a(sample_rate: u32, channels: u16, asc: &[u8]) -> Result<Vec<u8>> {
     body[6..8].copy_from_slice(&1u16.to_be_bytes()); // data_reference_index
     body[16..18].copy_from_slice(&channels.to_be_bytes());
     body[18..20].copy_from_slice(&16u16.to_be_bytes()); // sample_size
+
     // AudioSampleEntry sample rate is a 16.16 fixed-point value: the integer
     // part is only 16 bits. Shifting a rate >= 65536 overflowed u32 (wrapping
     // to a wrong field); the real rate also lives in mdhd timescale, so clamp

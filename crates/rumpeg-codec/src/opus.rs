@@ -163,7 +163,10 @@ impl OpusEncoderCodec {
     fn encode_frame(&mut self, frame_len: usize) -> Result<()> {
         let ch = self.channels.max(1);
         let take = frame_len * ch;
-        let chunk: Vec<f32> = self.pending_pcm.drain(..take.min(self.pending_pcm.len())).collect();
+        let chunk: Vec<f32> = self
+            .pending_pcm
+            .drain(..take.min(self.pending_pcm.len()))
+            .collect();
         let mut padded = chunk;
         padded.resize(frame_len * ch, 0.0);
         let mut packet = vec![0u8; 4000];
@@ -267,9 +270,11 @@ mod tests {
     fn opus_partial_frames_accumulate() {
         let mut enc = OpusEncoderCodec::new(&params()).unwrap();
         // Half a 20ms frame (480 samples @48k) per call; two calls make one frame.
-        enc.send_frame(Some(&Frame::Audio(audio_frame(480)))).unwrap();
+        enc.send_frame(Some(&Frame::Audio(audio_frame(480))))
+            .unwrap();
         assert!(matches!(enc.receive_packet(), Err(Error::NeedMoreData)));
-        enc.send_frame(Some(&Frame::Audio(audio_frame(480)))).unwrap();
+        enc.send_frame(Some(&Frame::Audio(audio_frame(480))))
+            .unwrap();
         assert!(enc.receive_packet().is_ok());
     }
 
@@ -277,7 +282,8 @@ mod tests {
     #[test]
     fn opus_flush_emits_tail() {
         let mut enc = OpusEncoderCodec::new(&params()).unwrap();
-        enc.send_frame(Some(&Frame::Audio(audio_frame(200)))).unwrap(); // < 960
+        enc.send_frame(Some(&Frame::Audio(audio_frame(200))))
+            .unwrap(); // < 960
         enc.send_frame(None).unwrap();
         assert!(enc.receive_packet().is_ok(), "tail frame must be emitted");
         assert!(matches!(enc.receive_packet(), Err(Error::Eof)));
