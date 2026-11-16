@@ -168,10 +168,6 @@ fn read_coeff_token(r: &mut BitReader<'_>, n_c: i32, max_coeff: usize) -> Result
     if max_coeff == 4 {
         return read_coeff_token_from_table(r, coeff_token_table(4));
     }
-    if n_c >= 8 {
-        let code = r.read_bits(6)? as usize;
-        return Ok((code >> 2, code & 3));
-    }
     read_coeff_token_from_table(r, coeff_token_table(nc_category(n_c)))
 }
 
@@ -190,11 +186,6 @@ fn write_coeff_token(
             }
         }
         return Err(Error::invalid("chroma DC coeff_token"));
-    }
-    if n_c >= 8 {
-        let code = ((total_coeff as u32) << 2) | (trailing_ones as u32);
-        w.write_bits(code, 6);
-        return Ok(());
     }
     let table = coeff_token_table(nc_category(n_c));
     for e in table {
@@ -430,6 +421,39 @@ mod tests {
                 let mut r = BitReader::new(&bytes);
                 let (_, out) = cavlc_decode_block(&mut r, n_c, 15).unwrap();
                 assert_eq!(out, levels, "nC={n_c} seed={seed}");
+            }
+        }
+    }
+
+    /// Differential test: bitstreams produced by our CAVLC encoder must be
+    /// readable by the spec-conformant VLC tables that the production decoder
+    /// (`rusty_h264-decoder`) is built on. The old `COEFF_NC4/NC8 = COEFF_NC2`
+    /// alias made nC>=4 blocks self-consistent but invisible to a real decoder.
+    #[test]
+    fn spec_decoder_reads_our_nc4_and_nc8_blocks() {
+        use rusty_h264_common::BitReader as RustyBitReader;
+
+        // Blocks with enough nonzeros to exercise nC 4..7 (table 2) and >=8
+        // (table 3): dense coefficients force large neighbour TotalCoeff.
+        let dense: [i32; 16] = [1, -2, 3, -1, 1, 1, -1, 2, -3, 1, -1, 1, 1, -1, 1, -1];
+        let sparse: [i32; 16] = [0, 0, 1, -1, 0, 2, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0];
+
+        for nc in [4, 5, 7, 8, 9, 16] {
+            for levels in [dense, sparse] {
+                let mut w = BitWriter::new();
+                cavlc_encode_block(&mut w, nc, &levels, 16).unwrap();
+                w.write_rbsp_trailing_bits();
+                let bytes = w.into_bytes();
+
+                let mut r = RustyBitReader::new(&bytes);
+                let (out, total) = rusty_h264_common::cavlc::decode_residual_block(&mut r, 16, nc)
+                    .expect("spec decoder must accept our bitstream");
+                assert_eq!(
+                    &out[..16],
+                    &levels[..16],
+                    "nC={nc}: spec decoder decoded different coefficients"
+                );
+                assert_eq!(total as usize, levels.iter().filter(|&&v| v != 0).count());
             }
         }
     }

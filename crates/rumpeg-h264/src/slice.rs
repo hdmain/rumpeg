@@ -134,7 +134,9 @@ pub fn write_idr_slice_header(w: &mut BitWriter, hdr: &SliceHeader, sps: &Sps, p
     w.write_flag(false); // long_term_reference_flag
     w.write_se(hdr.slice_qp_delta);
     if pps.deblocking_filter_control_present_flag {
-        w.write_ue(0);
+        // disable_deblocking_filter_idc=1: the encoder's reconstruction path
+        // has no loop filter, so decoding must not apply one either.
+        w.write_ue(1);
     }
 }
 
@@ -167,6 +169,32 @@ pub fn write_p_slice_header(w: &mut BitWriter, hdr: &SliceHeader, sps: &Sps, pps
     }
     w.write_se(hdr.slice_qp_delta);
     if pps.deblocking_filter_control_present_flag {
-        w.write_ue(0);
+        // disable_deblocking_filter_idc=1 (see write_idr_slice_header).
+        w.write_ue(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With deblocking_filter_control_present_flag=1 (set by the native encoder
+    /// to keep its unfiltered references in sync with the decoder), the slice
+    /// header carries disable_deblocking_filter_idc=1. Verify write/parse agree
+    /// and no alpha/beta offsets are expected when idc=1.
+    #[test]
+    fn idr_header_deblock_disabled_roundtrip() {
+        let sps = Sps::baseline(16, 16);
+        let pps = Pps::baseline();
+        assert!(pps.deblocking_filter_control_present_flag);
+        let hdr = SliceHeader::idr_i(0);
+        let mut w = BitWriter::new();
+        write_idr_slice_header(&mut w, &hdr, &sps, &pps);
+        w.write_rbsp_trailing_bits();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let parsed = parse_slice_header(&mut r, &sps, &pps, true).expect("parse header");
+        assert_eq!(parsed.slice_qp_delta, hdr.slice_qp_delta);
+        assert_eq!(parsed.frame_num, hdr.frame_num);
     }
 }
