@@ -126,6 +126,9 @@ pub struct AacEncoderCodec {
     sample_rate: u32,
     #[allow(dead_code)]
     channels: u16,
+    /// pts of the first input frame; the backend's sample-domain pts are
+    /// offset against this so output starts at the caller's timeline origin.
+    base_pts: Option<i64>,
 }
 
 impl AacEncoderCodec {
@@ -142,6 +145,7 @@ impl AacEncoderCodec {
             eof: false,
             sample_rate: audio.sample_rate.max(1),
             channels: audio.layout.channels.max(1),
+            base_pts: None,
         })
     }
 
@@ -155,7 +159,8 @@ impl AacEncoderCodec {
             match self.inner.next_packet() {
                 Ok(ep) => {
                     let mut pkt = Packet::new(Buffer::from_vec(ep.data));
-                    pkt.pts = Timestamp::new(ep.pts);
+                    let base = self.base_pts.unwrap_or(0);
+                    pkt.pts = Timestamp::new(base.saturating_add(ep.pts));
                     pkt.flags.insert(PacketFlags::KEY);
                     self.pending.push_back(pkt);
                 }
@@ -175,6 +180,9 @@ impl Encoder for AacEncoderCodec {
     fn send_frame(&mut self, frame: Option<&Frame>) -> Result<()> {
         match frame {
             Some(Frame::Audio(audio)) => {
+                if self.base_pts.is_none() && !audio.pts.is_none() {
+                    self.base_pts = Some(audio.pts.0);
+                }
                 let f32s: Vec<f32> = if audio.format == SampleFormat::F32 {
                     let data = audio.data();
                     data.chunks_exact(4)

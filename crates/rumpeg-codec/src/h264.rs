@@ -305,7 +305,8 @@ impl Decoder for H264Decoder {
             self.inner.flush();
             return Ok(());
         };
-        self.last_pts = packet.pts;
+        let prev_pts = self.last_pts;
+        let cur_pts = packet.pts;
         if self.avcc {
             self.inner
                 .decode_avcc_sample(packet.data.as_slice())
@@ -315,10 +316,29 @@ impl Decoder for H264Decoder {
                 .decode_annexb(packet.data.as_slice())
                 .map_err(map_h264)?;
         }
+        // One packet can yield several frames (e.g. a raw Annex-B blob). Give
+        // each output frame a distinct pts by spreading the [prev, cur] interval
+        // across them, instead of stamping every frame with the same pts.
+        let mut decoded = VecDeque::new();
         while let Some(yuv) = self.inner.receive().map_err(map_h264)? {
-            self.pending
-                .push_back(Frame::Video(yuv_to_video_frame(yuv, packet.pts)));
+            decoded.push_back(yuv);
         }
+        let n = decoded.len();
+        let step = if n > 1 && !prev_pts.is_none() && !cur_pts.is_none() && cur_pts.0 > prev_pts.0
+        {
+            (cur_pts.0 - prev_pts.0) / n as i64
+        } else {
+            0
+        };
+        for (i, yuv) in decoded.into_iter().enumerate() {
+            let pts = if step > 0 {
+                Timestamp::new(prev_pts.0 + step * (i as i64 + 1))
+            } else {
+                cur_pts
+            };
+            self.pending.push_back(Frame::Video(yuv_to_video_frame(yuv, pts)));
+        }
+        self.last_pts = cur_pts;
         Ok(())
     }
 
