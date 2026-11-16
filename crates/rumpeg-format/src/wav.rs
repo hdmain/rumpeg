@@ -144,10 +144,11 @@ fn parse_fmt(r: &mut dyn IoReader, chunk_size: u64) -> Result<(CodecParams, u16)
 
 /// Score a buffer for WAV detection (0–100).
 pub fn probe_score(buf: &[u8]) -> u32 {
+    // A bare RIFF magic is not enough: AVI and other RIFF containers share it.
+    // Only claim a score when the WAVE form type is present, otherwise probe
+    // reports AVI as WAV and open fails with a misleading "not a WAVE file".
     if buf.len() >= 12 && &buf[0..4] == b"RIFF" && &buf[8..12] == b"WAVE" {
         100
-    } else if buf.len() >= 4 && &buf[0..4] == b"RIFF" {
-        25
     } else {
         0
     }
@@ -397,5 +398,21 @@ mod tests {
         let mut cursor = std::io::Cursor::new(data);
         let err = parse_header(&mut cursor).unwrap_err();
         assert!(err.to_string().contains("short WAVE fmt"), "{err}");
+    }
+
+    /// Non-WAVE RIFF containers (e.g. AVI) must not be claimed by this probe.
+    #[test]
+    fn probe_rejects_non_wave_riff() {
+        let mut avi = Vec::new();
+        avi.extend_from_slice(b"RIFF");
+        avi.extend_from_slice(&100u32.to_le_bytes());
+        avi.extend_from_slice(b"AVI ");
+        assert_eq!(probe_score(&avi), 0);
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&100u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        assert_eq!(probe_score(&wav), 100);
     }
 }
