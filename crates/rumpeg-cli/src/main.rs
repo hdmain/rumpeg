@@ -475,6 +475,17 @@ fn cmd_convert(
         || reencode_video
         || is_mp4_output(output);
     if prefer_video {
+        // The MP4 muxer only carries AAC audio. Reject an explicit -c:a that
+        // cannot be honoured instead of silently re-encoding everything to AAC.
+        if is_mp4_output(output) {
+            if let Some(ca) = codec_audio {
+                if ca != "aac" && !is_copy_codec(ca) {
+                    return Err(Error::unsupported(format!(
+                        "MP4 output supports only AAC audio (got -c:a {ca})"
+                    )));
+                }
+            }
+        }
         let frame_limit = frames.or(if still { Some(1) } else { None });
         return try_convert_video(
             input,
@@ -766,16 +777,25 @@ fn try_convert_video(
     if let Some(p) = encode_preset {
         out_params.encode_preset = p.to_string();
     }
-    let _ = quality_video;
+    if quality_video.is_some() {
+        eprintln!("warning: --q:v is not supported by the current video encoders and was ignored");
+    }
 
     let mut graph = video_filter
         .map(Graph::parse)
         .transpose()?
         .unwrap_or_default();
-    for spec in overlays {
-        graph.add_overlay(parse_overlay(spec)?, in_stream.time_base);
-    }
     graph.set_fps_source(source_fps);
+    // The fps filter rewrites frame pts to 1/target-second ticks (frame indices).
+    // Timed overlays must interpret those pts in the same time base, otherwise
+    // `from`/`to` seconds are off by the ratio of the input time base to 1/target.
+    let overlay_time_base = graph
+        .target_fps()
+        .map(|t| Rational::new(1, t as i32))
+        .unwrap_or(in_stream.time_base);
+    for spec in overlays {
+        graph.add_overlay(parse_overlay(spec)?, overlay_time_base);
+    }
 
     if let Some(target) = graph.target_fps() {
         if let Some(v) = out_params.video_mut() {
