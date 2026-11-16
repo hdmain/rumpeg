@@ -117,7 +117,11 @@ impl OutputContext {
 impl Drop for OutputContext {
     fn drop(&mut self) {
         if self.header_written && !self.trailer_written {
-            let _ = self.muxer.write_trailer(&mut self.io);
+            // Drop cannot propagate errors, but swallowing them silently left
+            // files with a header and no usable index/trailer and no clue why.
+            if let Err(e) = self.muxer.write_trailer(&mut self.io) {
+                eprintln!("warning: failed to finalize output (write_trailer): {e}");
+            }
         }
     }
 }
