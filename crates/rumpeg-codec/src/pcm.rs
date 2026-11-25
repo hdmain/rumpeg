@@ -178,8 +178,8 @@ fn planar_to_interleaved(audio: &AudioFrame) -> Result<Vec<u8>> {
     }
     let mut out = vec![0u8; bps * ch * samples];
     for s in 0..samples {
-        for c in 0..ch {
-            let src = &audio.planes[c].as_slice()[s * bps..(s + 1) * bps];
+        for (c, plane) in audio.planes.iter().enumerate() {
+            let src = &plane.as_slice()[s * bps..(s + 1) * bps];
             let dst_off = (s * ch + c) * bps;
             out[dst_off..dst_off + bps].copy_from_slice(src);
         }
