@@ -15,3 +15,6 @@ thiserror = { workspace = true }
 rusty_h264-decoder = { workspace = true }
 
 [dev-dependencies]
+# Spec-conformant CAVLC tables / decoder for differential tests: our encoder's
+# bitstream must be readable by the same tables the production decoder uses.
+rusty_h264-common = { workspace = true }
