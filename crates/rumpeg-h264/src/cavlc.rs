@@ -234,8 +234,10 @@ fn read_level(r: &mut BitReader<'_>, suffix_length: i32) -> Result<i32> {
             (suffix_length as u32, (14i32) << suffix_length)
         }
     } else {
-        // level_prefix == 15
-        (12, 30) // 15 escaped; + level_suffix
+        // level_prefix == 15 escape: levelCode = (15 << suffixLength) + levelSuffix
+        // (ITU-T H.264 9.3.2.1). The old hardcoded base of 30 only matched
+        // suffix_length <= 1 and desynced from the encoder for suffix_length >= 2.
+        (12, 15i32 << suffix_length)
     };
 
     let level_suffix = if level_suffix_size > 0 {
@@ -273,11 +275,14 @@ fn write_level(w: &mut BitWriter, level: i32, suffix_length: i32) {
             w.write_bit(1);
             w.write_bits((level_code - 14) as u32, 4);
         } else {
+            // Escape: level_prefix == 15 with a 12-bit suffix; the decoder
+            // reconstructs level_code as (15 << suffixLength) + suffix, so the
+            // suffix must be level_code - 15 (15 << 0 for suffix_length == 0).
             for _ in 0..15 {
                 w.write_bit(0);
             }
             w.write_bit(1);
-            w.write_bits((level_code - 30) as u32, 12);
+            w.write_bits((level_code - 15) as u32, 12);
         }
         return;
     }
@@ -454,6 +459,40 @@ mod tests {
                     "nC={nc}: spec decoder decoded different coefficients"
                 );
                 assert_eq!(total as usize, levels.iter().filter(|&&v| v != 0).count());
+            }
+        }
+    }
+
+    #[test]
+    fn level_escape_roundtrip_across_suffix_lengths() {
+        // level_prefix == 15 escape: the decode base must be (15 << suffix_length),
+        // matching the encoder and ITU-T 9.3.2.1. The old decoder used a hardcoded
+        // base of 30, which desynced for suffix_length >= 2.
+        for suffix_length in 0..=6i32 {
+            let base = if suffix_length == 0 {
+                30
+            } else {
+                15 << suffix_length
+            };
+            // 12-bit suffix caps the escape at level_code = (15 << suffix_length) + 4095;
+            // delta 4080 keeps every case representable (suffix_length=0 → max 4110).
+            for delta in [0i32, 1, 100, 4080] {
+                let level_code = base + delta;
+                let level = if level_code % 2 == 0 {
+                    (level_code + 2) >> 1
+                } else {
+                    -((level_code + 1) >> 1)
+                };
+                let mut w = BitWriter::new();
+                write_level(&mut w, level, suffix_length);
+                w.write_rbsp_trailing_bits();
+                let bytes = w.into_bytes();
+                let mut r = BitReader::new(&bytes);
+                assert_eq!(
+                    read_level(&mut r, suffix_length).unwrap(),
+                    level,
+                    "suffix_length={suffix_length} level_code={level_code}"
+                );
             }
         }
     }
